@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Fix Gemini Parser",
+  "version": "2.0",
+  "content_scripts": [
+    {
+      "matches": ["https://gemini.google.com/*"], 
+      "js": ["lib/katex.min.js", "content.js"],
+      "css": ["lib/katex.min.css"]
+    }
+  ]
+}
