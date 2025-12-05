@@ -108,16 +108,16 @@ function reRenderContent() {
     const container = document.querySelector(targetSelector);
     if (!container) return;
 
-    // 아직 건드리지 않은 p 태그들 수집
-    const paragraphs = container.querySelectorAll('p:not([data-rerendered="true"])');
+    // 아직 건드리지 않은 p, h1~h4 태그들 수집
+    const elements = container.querySelectorAll('p:not([data-rerendered="true"]), h1:not([data-rerendered="true"]), h2:not([data-rerendered="true"]), h3:not([data-rerendered="true"]), h4:not([data-rerendered="true"])');
 
-    paragraphs.forEach(p => {
+    elements.forEach(elem => {
         // 기존 DOM 해체
-        const rawText = serializeToRawText(p);
+        const rawText = serializeToRawText(elem);
 
         // 바꿀거 없으면 스킵
         if (!rawText.trim() || !rawText.match(/\*|\$|`/)) {
-            p.setAttribute('data-rerendered', 'true');
+            elem.setAttribute('data-rerendered', 'true');
             return;
         }
 
@@ -125,19 +125,19 @@ function reRenderContent() {
         const newHtml = parseAndRender(rawText);
 
         // DOM 덮어씌우기
-        if (p.innerHTML !== newHtml) {
-            p.innerHTML = htmlPolicy.createHTML(newHtml);
+        if (elem.innerHTML !== newHtml) {
+            elem.innerHTML = htmlPolicy.createHTML(newHtml);
         }
         
         // 처리 완료 표시
-        p.setAttribute('data-rerendered', 'true');
+        elem.setAttribute('data-rerendered', 'true');
     });
 }
 
 const observer = new MutationObserver((mutations) => {
     const needsUpdate = mutations.some(m => 
         m.addedNodes.length > 0 || 
-        (m.type === 'childList' && m.target.tagName === 'P')
+        (m.type === 'childList' && ['P', 'H1', 'H2', 'H3', 'H4'].includes(m.target.tagName))
     );
     if (needsUpdate) reRenderContent();
 });

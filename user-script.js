@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini Math & Markdown Fixer
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      2.1
 // @description  Google Gemini 모바일/PC 웹에서 깨지는 수식($...$)과 볼드체(**...**)를 강제로 고쳐줍니다.
 // @author       My AI Partner
 // @match        https://gemini.google.com/*
@@ -94,24 +94,24 @@
         const container = document.querySelector(targetSelector);
         if (!container) return;
 
-        const paragraphs = container.querySelectorAll('p:not([data-rerendered="true"])');
-        paragraphs.forEach(p => {
-            const rawText = serializeToRawText(p);
+        const elements = container.querySelectorAll('p:not([data-rerendered="true"]), h1:not([data-rerendered="true"]), h2:not([data-rerendered="true"]), h3:not([data-rerendered="true"]), h4:not([data-rerendered="true"])');
+        elements.forEach(elem => {
+            const rawText = serializeToRawText(elem);
             if (!rawText.trim() || !rawText.match(/\*|\$|`/)) {
-                p.setAttribute('data-rerendered', 'true');
+                elem.setAttribute('data-rerendered', 'true');
                 return;
             }
             const newHtml = parseAndRender(rawText);
-            if (p.innerHTML !== newHtml) {
-                p.innerHTML = htmlPolicy.createHTML(newHtml);
+            if (elem.innerHTML !== newHtml) {
+                elem.innerHTML = htmlPolicy.createHTML(newHtml);
             }
-            p.setAttribute('data-rerendered', 'true');
+            elem.setAttribute('data-rerendered', 'true');
         });
     }
 
     // 감시 시작
     const observer = new MutationObserver((mutations) => {
-        const needsUpdate = mutations.some(m => m.addedNodes.length > 0 || (m.type === 'childList' && m.target.tagName === 'P'));
+        const needsUpdate = mutations.some(m => m.addedNodes.length > 0 || (m.type === 'childList' && ['P', 'H1', 'H2', 'H3', 'H4'].includes(m.target.tagName)));
         if (needsUpdate) reRenderContent();
     });
 
