@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Fix Gemini Parser",
-  "version": "3.2",
+  "version": "3.3",
   "description": "Gemini에서 깨지는 수식과 마크다운을 고쳐줍니다.",
   "permissions": ["storage"],
   "action": {
