@@ -90,11 +90,12 @@ function render(text) {
                     .replace(/&lt;/g, '<')
                     .replace(/&gt;/g, '>')
                     .replace(/&amp;/g, '&');
-                return katex.renderToString(clean, {
+                const rendered = katex.renderToString(clean, {
                     throwOnError: true,
                     output: 'html',
                     displayMode: false
                 });
+                return `<span class="math-inline" data-math="${clean}">${rendered}</span>`;
             } catch {
                 return match;
             }
