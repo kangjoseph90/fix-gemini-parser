@@ -75,6 +75,11 @@
                     case 'B':
                     case 'STRONG':
                         return `**${children}**`;
+                    case 'S':
+                    case 'DEL':
+                        return `~~${children}~~`;
+                    case 'U':
+                        return `<u>${children}</u>`;
                     case 'CODE':
                         return `\`${children}\``;
                     case 'BR':
@@ -147,13 +152,13 @@
                 const children = Array.from(node.childNodes).map(n => this.serialize(n)).join('');
 
                 switch (tagName) {
-                    case 'EM':
-                        return `*${children}*`;
                     case 'STRONG':
                         return `**${children}**`;
                     case 'S':
                     case 'DEL':
                         return `~~${children}~~`;
+                    case 'U':
+                        return `<u>${children}</u>`;
                     case 'BR':
                         return '\n';
                     case 'MS-KATEX':
@@ -165,6 +170,9 @@
                     default:
                         if (node.classList.contains('inline-code')) {
                             return `\`${children}\``;
+                        }
+                        if (node.tagName === 'SPAN' && node.style.fontStyle === 'italic') {
+                            return `*${children}*`;
                         }
                         return children;
                 }

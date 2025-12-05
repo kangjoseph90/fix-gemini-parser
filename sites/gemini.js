@@ -24,6 +24,11 @@ const geminiConfig = {
                 case 'B':
                 case 'STRONG':
                     return `**${children}**`;
+                case 'S':
+                case 'DEL':
+                    return `~~${children}~~`;
+                case 'U':
+                    return `<u>${children}</u>`;
                 case 'CODE':
                     return `\`${children}\``;
                 case 'BR':

@@ -18,13 +18,13 @@ const aistudioConfig = {
             const children = Array.from(node.childNodes).map(n => this.serialize(n, settings)).join('');
 
             switch (tagName) {
-                case 'EM':
-                    return `*${children}*`;
                 case 'STRONG':
                     return `**${children}**`;
                 case 'S':
                 case 'DEL':
                     return `~~${children}~~`;
+                case 'U':
+                    return `<u>${children}</u>`;
                 case 'BR':
                     return '\n';
                 case 'MS-KATEX':
@@ -41,6 +41,9 @@ const aistudioConfig = {
                     // inline-code 클래스 처리
                     if (node.classList.contains('inline-code')) {
                         return `\`${children}\``;
+                    }
+                    if (node.tagName === 'SPAN' && node.style.fontStyle === 'italic') {
+                        return `*${children}*`;
                     }
                     return children;
             }
