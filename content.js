@@ -1,8 +1,8 @@
-// ============================================
-// 공통 실행기 (사이트별 로직은 sites/*.js에서 정의)
-// ============================================
+// ==================================
+// Fix Gemini Parser - Content Script
+// ==================================
 
-// 전역 설정 객체
+// 설정
 let SETTINGS = {
     enabled: true,
     latex: true,
@@ -13,120 +13,175 @@ let SETTINGS = {
     code: true
 };
 
-let htmlPolicy = { createHTML: (string) => string };
-if (window.trustedTypes && window.trustedTypes.createPolicy) {
+// Trusted Types 정책
+let htmlPolicy = { createHTML: (s) => s };
+if (window.trustedTypes?.createPolicy) {
     try {
-        htmlPolicy = window.trustedTypes.createPolicy('re-build-engine', {
-            createHTML: (string) => string,
+        htmlPolicy = window.trustedTypes.createPolicy('gemini-parser', {
+            createHTML: (s) => s
         });
     } catch (e) { console.warn(e); }
 }
 
-// 현재 사이트에 맞는 config 찾기
-function detectSiteConfig() {
-    const hostname = window.location.hostname;
-    const configs = window.siteConfigs || [];
-    
-    for (const config of configs) {
-        if (config.hostPattern.test(hostname)) {
-            console.log(`[ReRender] Detected site: ${config.name}`);
-            return config;
+// ==================================
+// DOM → Markdown 변환
+// ==================================
+function serialize(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+        return node.nodeValue;
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+        return '';
+    }
+
+    const tag = node.tagName;
+    const children = Array.from(node.childNodes).map(serialize).join('');
+
+    switch (tag) {
+        case 'I':
+        case 'EM':
+            return `*${children}*`;
+        case 'B':
+        case 'STRONG':
+            return `**${children}**`;
+        case 'S':
+        case 'DEL':
+            return `~~${children}~~`;
+        case 'U':
+            return `<u>${children}</u>`;
+        case 'CODE':
+            return `\`${children}\``;
+        case 'BR':
+            return '\n';
+        default:
+            if (node.classList.contains('math-inline')) {
+                const math = node.getAttribute('data-math');
+                if (math) return `$${math}$`;
+            }
+            return children;
+    }
+}
+
+// ==================================
+// Markdown → HTML 변환
+// ==================================
+function render(text) {
+    // HTML 이스케이프
+    let html = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+    // 1. 인라인 코드 보호
+    const codes = [];
+    if (SETTINGS.code) {
+        html = html.replace(/(`+)(.*?)\1/g, (_, tick, content) => {
+            codes.push(`<code>${content}</code>`);
+            return `__CODE_${codes.length - 1}__`;
+        });
+    }
+
+    // 2. LaTeX 수식
+    if (SETTINGS.latex && typeof katex !== 'undefined') {
+        html = html.replace(/(?<!\\)\$([^$]+?)\$/g, (match, latex) => {
+            try {
+                const clean = latex
+                    .replace(/&lt;/g, '<')
+                    .replace(/&gt;/g, '>')
+                    .replace(/&amp;/g, '&');
+                return katex.renderToString(clean, {
+                    throwOnError: true,
+                    output: 'html',
+                    displayMode: false
+                });
+            } catch {
+                return match;
+            }
+        });
+    }
+
+    // 3. 마크다운 서식
+    if (SETTINGS.bold) html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+    if (SETTINGS.italic) html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<i>$1</i>');
+    if (SETTINGS.strike) html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
+    if (SETTINGS.underline) html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
+
+    // 4. 코드 복구
+    if (SETTINGS.code) {
+        html = html.replace(/__CODE_(\d+)__/g, (_, i) => codes[i]);
+    }
+
+    // 5. 줄바꿈
+    return html.replace(/\n/g, '<br>');
+}
+
+// ==================================
+// 처리 필요 여부 체크
+// ==================================
+function needsProcessing(text) {
+    if (!text.trim()) return false;
+    return /\*|\$|`|~~|<u>/.test(text);
+}
+
+// ==================================
+// 메인 렌더링
+// ==================================
+const SELECTOR = 'p:not([data-rendered]), h1:not([data-rendered]), h2:not([data-rendered]), h3:not([data-rendered]), h4:not([data-rendered]), td:not([data-rendered]), th:not([data-rendered])';
+
+function reRender() {
+    if (!SETTINGS.enabled) return;
+
+    const container = document.querySelector('.chat-container');
+    if (!container) return;
+
+    // 스트리밍 중이면 건너뛰기
+    if (container.querySelector('.pending, .animating')) return;
+
+    container.querySelectorAll(SELECTOR).forEach(el => {
+        const markdown = serialize(el);
+
+        if (!needsProcessing(markdown)) {
+            el.setAttribute('data-rendered', '');
+            return;
         }
-    }
-    
-    console.warn('[ReRender] No matching site config found for:', hostname);
-    return null;
+
+        const newHtml = render(markdown);
+        if (el.innerHTML !== newHtml) {
+            el.innerHTML = htmlPolicy.createHTML(newHtml);
+        }
+        el.setAttribute('data-rendered', '');
+    });
 }
 
-// 엔진 생성 함수
-function createEngine(config) {
-    if (!config) return null;
-
-    // 메인 렌더링 함수
-    function reRenderContent() {
-        if (!SETTINGS.enabled) return;
-        
-        const container = document.querySelector(config.targetSelector);
-        if (!container) return;
-
-        // 스트리밍 중인 요소가 있으면 전체 건너뛰기
-        if (container.querySelector('.pending, .animating')) return;
-
-        const elements = container.querySelectorAll(config.elementSelector);
-
-        elements.forEach(elem => {
-            // 사이트별 serialize 메소드 사용 (SETTINGS 전달)
-            const rawText = config.serialize(elem, SETTINGS);
-
-            // 사이트별 처리 필요 여부 체크
-            if (!config.needsProcessing(rawText, SETTINGS)) {
-                elem.setAttribute('data-rerendered', 'true');
-                return;
-            }
-
-            // 사이트별 render 메소드 사용 (SETTINGS 전달)
-            const newHtml = config.render(rawText, SETTINGS);
-
-            if (elem.innerHTML !== newHtml) {
-                elem.innerHTML = htmlPolicy.createHTML(newHtml);
-            }
-            
-            elem.setAttribute('data-rerendered', 'true');
-        });
-    }
-
-    // MutationObserver 시작
-    function observe() {
-        const observer = new MutationObserver((mutations) => {
-            const needsUpdate = mutations.some(m => 
-                m.addedNodes.length > 0 || 
-                (m.type === 'childList' && ['P', 'H1', 'H2', 'H3', 'H4', 'TD', 'TH'].includes(m.target.tagName))
-            );
-            if (needsUpdate) reRenderContent();
-        });
-
-        observer.observe(document.body, {
-            childList: true,
-            subtree: true,
-            characterData: true
-        });
-
-        // 초기 실행
-        reRenderContent();
-        
-        console.log(`[ReRender] Engine started for ${config.name}`);
-    }
-
-    return { observe, reRenderContent };
-}
-
-// 설정 불러오기 및 엔진 시작
+// ==================================
+// 초기화
+// ==================================
 chrome.storage.sync.get(SETTINGS, (stored) => {
     SETTINGS = { ...SETTINGS, ...stored };
-    
+
     if (!SETTINGS.enabled) {
-        console.log('[ReRender] Extension disabled by user');
+        console.log('[Gemini Parser] 비활성화됨');
         return;
     }
-    
-    const siteConfig = detectSiteConfig();
-    if (siteConfig) {
-        const engine = createEngine(siteConfig);
-        engine.observe();
-        
-        // 설정 변경 리스너
-        chrome.runtime.onMessage.addListener((message) => {
-            if (message.type === 'settingsUpdated') {
-                SETTINGS = message.settings;
-                // 기존 렌더링 마크 제거하여 재렌더링 트리거
-                document.querySelectorAll('[data-rerendered]').forEach(el => {
-                    el.removeAttribute('data-rerendered');
-                });
-                engine.reRenderContent();
-                console.log('[ReRender] Settings updated:', SETTINGS);
-            }
-        });
-    } else {
-        console.warn('[ReRender] Extension disabled - unsupported site');
-    }
+
+    // DOM 변경 감지
+    new MutationObserver(() => reRender()).observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+
+    reRender();
+    console.log('[Gemini Parser] 시작됨');
+
+    // 설정 변경 리스너
+    chrome.runtime.onMessage.addListener((msg) => {
+        if (msg.type === 'settingsUpdated') {
+            SETTINGS = msg.settings;
+            document.querySelectorAll('[data-rendered]').forEach(el => {
+                el.removeAttribute('data-rendered');
+            });
+            reRender();
+        }
+    });
 });

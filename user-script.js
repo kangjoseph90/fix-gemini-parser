@@ -14,197 +14,178 @@
 (function() {
     'use strict';
 
-    // ============================================
-    // 🔧 사용자 설정 (여기서 true/false 수정)
-    // ============================================
+    // ==================================
+    // 🔧 사용자 설정
+    // ==================================
     const SETTINGS = {
-        enabled: true,      // 전체 on/off
-        latex: true,        // $수식$ 파싱
-        bold: true,         // **볼드** 파싱
-        italic: true,       // *이탤릭* 파싱
-        strike: true,       // ~~취소선~~ 파싱
-        underline: true,    // <u>밑줄</u> 파싱
-        code: true,         // `코드` 파싱
+        enabled: true,
+        latex: true,
+        bold: true,
+        italic: true,
+        strike: true,
+        underline: true,
+        code: true
     };
-    // ============================================
 
-    // 전체 비활성화시 종료
-    if (!SETTINGS.enabled) {
-        console.log('[AI Fixer] Disabled by user settings');
-        return;
-    }
+    if (!SETTINGS.enabled) return;
 
-    // KaTeX CSS 스타일 주입
+    // ==================================
+    // 스타일 주입
+    // ==================================
     GM_addStyle(GM_getResourceText("KATEX_CSS"));
     GM_addStyle(`
         .katex { font-size: 1.1em; }
         .math-inline-wrapper { display: inline-block; }
     `);
 
-    // 보안 정책 우회
-    let htmlPolicy = { createHTML: (string) => string };
-    if (window.trustedTypes && window.trustedTypes.createPolicy) {
+    // Trusted Types 정책
+    let htmlPolicy = { createHTML: (s) => s };
+    if (window.trustedTypes?.createPolicy) {
         try {
-            htmlPolicy = window.trustedTypes.createPolicy('ai-fixer-userscript', {
-                createHTML: (string) => string,
+            htmlPolicy = window.trustedTypes.createPolicy('gemini-parser', {
+                createHTML: (s) => s
             });
         } catch (e) {}
     }
 
-    // ============================================
-    // 사이트별 설정
-    // ============================================
+    // ==================================
+    // DOM → Markdown 변환
+    // ==================================
+    function serialize(node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+            return node.nodeValue;
+        }
 
-    const geminiConfig = {
-        name: 'gemini',
-        hostPattern: /gemini\.google\.com/,
-        targetSelector: '.chat-container',
-        elementSelector: 'p:not([data-rerendered="true"]), h1:not([data-rerendered="true"]), h2:not([data-rerendered="true"]), h3:not([data-rerendered="true"]), h4:not([data-rerendered="true"]), td:not([data-rerendered="true"]), th:not([data-rerendered="true"])',
-
-        serialize(node) {
-            if (node.nodeType === Node.TEXT_NODE) return node.nodeValue;
-            if (node.nodeType === Node.ELEMENT_NODE) {
-                const tagName = node.tagName.toUpperCase();
-                const children = Array.from(node.childNodes).map(n => this.serialize(n)).join('');
-
-                switch (tagName) {
-                    case 'I':
-                    case 'EM':
-                        return `*${children}*`;
-                    case 'B':
-                    case 'STRONG':
-                        return `**${children}**`;
-                    case 'S':
-                    case 'DEL':
-                        return `~~${children}~~`;
-                    case 'U':
-                        return `<u>${children}</u>`;
-                    case 'CODE':
-                        return `\`${children}\``;
-                    case 'BR':
-                        return '\n';
-                    default:
-                        if (node.classList.contains('math-inline')) {
-                            const mathData = node.getAttribute('data-math');
-                            if (mathData) return `$${mathData}$`;
-                        }
-                        return children;
-                }
-            }
+        if (node.nodeType !== Node.ELEMENT_NODE) {
             return '';
-        },
-
-        render(rawText) {
-            let html = rawText
-                .replace(/&/g, "&amp;")
-                .replace(/</g, "&lt;")
-                .replace(/>/g, "&gt;");
-
-            // 인라인 코드 보호
-            const codeBlocks = [];
-            if (SETTINGS.code) {
-                html = html.replace(/(`+)(.*?)\1/g, (match, tick, content) => {
-                    codeBlocks.push(`<code>${content}</code>`);
-                    return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
-                });
-            }
-
-            // LaTeX 수식
-            if (SETTINGS.latex && typeof katex !== 'undefined') {
-                html = html.replace(/(?<!\\)\$([^$]+?)\$/g, (match, latex) => {
-                    try {
-                        const cleanLatex = latex.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-                        return katex.renderToString(cleanLatex, { throwOnError: true, output: 'html', displayMode: false });
-                    } catch (e) { return match; }
-                });
-            }
-
-            // Markdown → Gemini 스타일
-            if (SETTINGS.bold) html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
-            if (SETTINGS.italic) html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<i>$1</i>');
-            if (SETTINGS.strike) html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
-            if (SETTINGS.underline) html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
-
-            // 코드 블록 복구 & 줄바꿈
-            if (SETTINGS.code) html = html.replace(/__CODE_BLOCK_(\d+)__/g, (m, i) => codeBlocks[i]);
-            html = html.replace(/\n/g, '<br>');
-
-            return html;
-        },
-
-        needsProcessing(rawText) {
-            if (!rawText.trim()) return false;
-            return new RegExp('\\*|\\$|`|~~|<u>').test(rawText);
         }
-    };
 
-    // ============================================
-    // 공통 엔진
-    // ============================================
+        const tag = node.tagName;
+        const children = Array.from(node.childNodes).map(serialize).join('');
 
-    const siteConfigs = [geminiConfig];
-
-    function detectSiteConfig() {
-        const hostname = window.location.hostname;
-        for (const config of siteConfigs) {
-            if (config.hostPattern.test(hostname)) {
-                console.log(`[AI Fixer] Detected site: ${config.name}`);
-                return config;
-            }
-        }
-        return null;
-    }
-
-    function createEngine(config) {
-        function reRenderContent() {
-            const container = document.querySelector(config.targetSelector);
-            if (!container) return;
-
-            const elements = container.querySelectorAll(config.elementSelector);
-            elements.forEach(elem => {
-                const rawText = config.serialize(elem);
-
-                if (!config.needsProcessing(rawText)) {
-                    elem.setAttribute('data-rerendered', 'true');
-                    return;
+        switch (tag) {
+            case 'I':
+            case 'EM':
+                return `*${children}*`;
+            case 'B':
+            case 'STRONG':
+                return `**${children}**`;
+            case 'S':
+            case 'DEL':
+                return `~~${children}~~`;
+            case 'U':
+                return `<u>${children}</u>`;
+            case 'CODE':
+                return `\`${children}\``;
+            case 'BR':
+                return '\n';
+            default:
+                if (node.classList.contains('math-inline')) {
+                    const math = node.getAttribute('data-math');
+                    if (math) return `$${math}$`;
                 }
+                return children;
+        }
+    }
 
-                const newHtml = config.render(rawText);
-                if (elem.innerHTML !== newHtml) {
-                    elem.innerHTML = htmlPolicy.createHTML(newHtml);
+    // ==================================
+    // Markdown → HTML 변환
+    // ==================================
+    function render(text) {
+        // HTML 이스케이프
+        let html = text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+
+        // 1. 인라인 코드 보호
+        const codes = [];
+        if (SETTINGS.code) {
+            html = html.replace(/(`+)(.*?)\1/g, (_, tick, content) => {
+                codes.push(`<code>${content}</code>`);
+                return `__CODE_${codes.length - 1}__`;
+            });
+        }
+
+        // 2. LaTeX 수식
+        if (SETTINGS.latex && typeof katex !== 'undefined') {
+            html = html.replace(/(?<!\\)\$([^$]+?)\$/g, (match, latex) => {
+                try {
+                    const clean = latex
+                        .replace(/&lt;/g, '<')
+                        .replace(/&gt;/g, '>')
+                        .replace(/&amp;/g, '&');
+                    return katex.renderToString(clean, {
+                        throwOnError: true,
+                        output: 'html',
+                        displayMode: false
+                    });
+                } catch {
+                    return match;
                 }
-                elem.setAttribute('data-rerendered', 'true');
             });
         }
 
-        function observe() {
-            const observer = new MutationObserver((mutations) => {
-                const needsUpdate = mutations.some(m =>
-                    m.addedNodes.length > 0 ||
-                    (m.type === 'childList' && ['P', 'H1', 'H2', 'H3', 'H4', 'TD', 'TH'].includes(m.target.tagName))
-                );
-                if (needsUpdate) reRenderContent();
-            });
+        // 3. 마크다운 서식
+        if (SETTINGS.bold) html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+        if (SETTINGS.italic) html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<i>$1</i>');
+        if (SETTINGS.strike) html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
+        if (SETTINGS.underline) html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
 
-            observer.observe(document.body, {
-                childList: true,
-                subtree: true,
-                characterData: true
-            });
-
-            reRenderContent();
-            console.log(`[AI Fixer] Engine started for ${config.name}`);
+        // 4. 코드 복구
+        if (SETTINGS.code) {
+            html = html.replace(/__CODE_(\d+)__/g, (_, i) => codes[i]);
         }
 
-        return { observe, reRenderContent };
+        // 5. 줄바꿈
+        return html.replace(/\n/g, '<br>');
     }
 
-    // 실행
-    const siteConfig = detectSiteConfig();
-    if (siteConfig) {
-        createEngine(siteConfig).observe();
-    } else {
-        console.warn('[AI Fixer] Unsupported site');
+    // ==================================
+    // 처리 필요 여부 체크
+    // ==================================
+    function needsProcessing(text) {
+        if (!text.trim()) return false;
+        return /\*|\$|`|~~|<u>/.test(text);
     }
+
+    // ==================================
+    // 메인 렌더링
+    // ==================================
+    const SELECTOR = 'p:not([data-rendered]), h1:not([data-rendered]), h2:not([data-rendered]), h3:not([data-rendered]), h4:not([data-rendered]), td:not([data-rendered]), th:not([data-rendered])';
+
+    function reRender() {
+        const container = document.querySelector('.chat-container');
+        if (!container) return;
+
+        // 스트리밍 중이면 건너뛰기
+        if (container.querySelector('.pending, .animating')) return;
+
+        container.querySelectorAll(SELECTOR).forEach(el => {
+            const markdown = serialize(el);
+
+            if (!needsProcessing(markdown)) {
+                el.setAttribute('data-rendered', '');
+                return;
+            }
+
+            const newHtml = render(markdown);
+            if (el.innerHTML !== newHtml) {
+                el.innerHTML = htmlPolicy.createHTML(newHtml);
+            }
+            el.setAttribute('data-rendered', '');
+        });
+    }
+
+    // ==================================
+    // 초기화
+    // ==================================
+    new MutationObserver(() => reRender()).observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+
+    reRender();
+    console.log('[Gemini Parser] 시작됨');
 
 })();
