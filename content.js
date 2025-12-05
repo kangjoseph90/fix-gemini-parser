@@ -83,6 +83,7 @@ function render(text) {
     }
 
     // 2. LaTeX 수식
+    const maths = [];
     if (SETTINGS.latex && typeof katex !== 'undefined') {
         html = html.replace(/(?<!\\)\$([^$]+?)\$/g, (match, latex) => {
             try {
@@ -95,7 +96,8 @@ function render(text) {
                     output: 'html',
                     displayMode: false
                 });
-                return `<span class="math-inline gemini-parser-math" data-math="${clean}">${rendered}</span>`;
+                maths.push(`<span class="math-inline gemini-parser-math" data-math="${clean}">${rendered}</span>`);
+                return `__MATH_${maths.length - 1}__`;
             } catch {
                 return match;
             }
@@ -114,7 +116,14 @@ function render(text) {
     }
 
     // 5. 줄바꿈
-    return html.replace(/\n/g, '<br>');
+    html = html.replace(/\n/g, '<br>');
+
+    // 6. 수식 복구
+    if (SETTINGS.latex) {
+        html = html.replace(/__MATH_(\d+)__/g, (_, i) => maths[i]);
+    }
+
+    return html;
 }
 
 // ==================================
