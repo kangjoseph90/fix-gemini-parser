@@ -5,7 +5,7 @@ const geminiConfig = {
     
     // DOM 선택자
     targetSelector: '.chat-container',
-    elementSelector: 'p:not([data-rerendered="true"]), h1:not([data-rerendered="true"]), h2:not([data-rerendered="true"]), h3:not([data-rerendered="true"]), h4:not([data-rerendered="true"])',
+    elementSelector: 'p:not([data-rerendered="true"]), h1:not([data-rerendered="true"]), h2:not([data-rerendered="true"]), h3:not([data-rerendered="true"]), h4:not([data-rerendered="true"]), td:not([data-rerendered="true"]), th:not([data-rerendered="true"])',
     
     // DOM → Raw Text 변환
     serialize(node) {

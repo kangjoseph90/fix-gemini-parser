@@ -64,7 +64,7 @@ function createEngine(config) {
         const observer = new MutationObserver((mutations) => {
             const needsUpdate = mutations.some(m => 
                 m.addedNodes.length > 0 || 
-                (m.type === 'childList' && ['P', 'H1', 'H2', 'H3', 'H4'].includes(m.target.tagName))
+                (m.type === 'childList' && ['P', 'H1', 'H2', 'H3', 'H4', 'TD', 'TH'].includes(m.target.tagName))
             );
             if (needsUpdate) reRenderContent();
         });

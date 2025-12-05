@@ -40,7 +40,7 @@
         name: 'gemini',
         hostPattern: /gemini\.google\.com/,
         targetSelector: '.chat-container',
-        elementSelector: 'p:not([data-rerendered="true"]), h1:not([data-rerendered="true"]), h2:not([data-rerendered="true"]), h3:not([data-rerendered="true"]), h4:not([data-rerendered="true"])',
+        elementSelector: 'p:not([data-rerendered="true"]), h1:not([data-rerendered="true"]), h2:not([data-rerendered="true"]), h3:not([data-rerendered="true"]), h4:not([data-rerendered="true"]), td:not([data-rerendered="true"]), th:not([data-rerendered="true"])',
 
         serialize(node) {
             if (node.nodeType === Node.TEXT_NODE) return node.nodeValue;
@@ -96,6 +96,8 @@
             // Markdown → Gemini 스타일
             html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
             html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<i>$1</i>');
+            html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
+            html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
 
             // 코드 블록 복구 & 줄바꿈
             html = html.replace(/__CODE_BLOCK_(\d+)__/g, (m, i) => codeBlocks[i]);
@@ -105,7 +107,7 @@
         },
 
         needsProcessing(rawText) {
-            return rawText.trim() && /\*|\$|`/.test(rawText);
+            return rawText.trim() && /\*|\$|`|~~|<u>/.test(rawText);
         }
     };
 
@@ -113,7 +115,7 @@
         name: 'aistudio',
         hostPattern: /aistudio\.google\.com/,
         targetSelector: '.chat-session-content',
-        elementSelector: 'p:not([data-rerendered="true"]), h1:not([data-rerendered="true"]), h2:not([data-rerendered="true"]), h3:not([data-rerendered="true"]), h4:not([data-rerendered="true"])',
+        elementSelector: 'p:not([data-rerendered="true"]), h1:not([data-rerendered="true"]), h2:not([data-rerendered="true"]), h3:not([data-rerendered="true"]), h4:not([data-rerendered="true"]), td:not([data-rerendered="true"]), th:not([data-rerendered="true"])',
 
         serialize(node) {
             if (node.nodeType === Node.TEXT_NODE) return node.nodeValue;
@@ -175,6 +177,7 @@
             html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
             html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<span style="font-style:italic">$1</span>');
             html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
+            html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
 
             // 코드 블록 복구 & 줄바꿈
             html = html.replace(/__CODE_BLOCK_(\d+)__/g, (m, i) => codeBlocks[i]);
@@ -184,7 +187,7 @@
         },
 
         needsProcessing(rawText) {
-            return rawText.trim() && /\*|\$|`|~~/.test(rawText);
+            return rawText.trim() && /\*|\$|`|~~|<u>/.test(rawText);
         }
     };
 
@@ -231,7 +234,7 @@
             const observer = new MutationObserver((mutations) => {
                 const needsUpdate = mutations.some(m =>
                     m.addedNodes.length > 0 ||
-                    (m.type === 'childList' && ['P', 'H1', 'H2', 'H3', 'H4'].includes(m.target.tagName))
+                    (m.type === 'childList' && ['P', 'H1', 'H2', 'H3', 'H4', 'TD', 'TH'].includes(m.target.tagName))
                 );
                 if (needsUpdate) reRenderContent();
             });
