@@ -1,7 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Fix Gemini Parser",
-  "version": "3.1",
+  "version": "3.2",
+  "description": "Gemini, AI Studio 등에서 깨지는 수식과 마크다운을 고쳐줍니다.",
+  "permissions": ["storage"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Fix Parser 설정"
+  },
   "content_scripts": [
     {
       "matches": [

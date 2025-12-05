@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Gemini Parser
 // @namespace    http://tampermonkey.net/
-// @version      3.1
+// @version      3.2
 // @description  Gemini, AI Studio 등에서 깨지는 수식($...$)과 마크다운을 고쳐줍니다.
 // @author       kangjoseph90
 // @match        https://gemini.google.com/*
@@ -14,6 +14,26 @@
 
 (function() {
     'use strict';
+
+    // ============================================
+    // 🔧 사용자 설정 (여기서 true/false 수정)
+    // ============================================
+    const SETTINGS = {
+        enabled: true,      // 전체 on/off
+        latex: true,        // $수식$ 파싱
+        bold: true,         // **볼드** 파싱
+        italic: true,       // *이탤릭* 파싱
+        strike: true,       // ~~취소선~~ 파싱
+        underline: true,    // <u>밑줄</u> 파싱
+        code: true,         // `코드` 파싱
+    };
+    // ============================================
+
+    // 전체 비활성화시 종료
+    if (!SETTINGS.enabled) {
+        console.log('[AI Fixer] Disabled by user settings');
+        return;
+    }
 
     // KaTeX CSS 스타일 주입
     GM_addStyle(GM_getResourceText("KATEX_CSS"));
@@ -78,13 +98,15 @@
 
             // 인라인 코드 보호
             const codeBlocks = [];
-            html = html.replace(/(`+)(.*?)\1/g, (match, tick, content) => {
-                codeBlocks.push(`<code>${content}</code>`);
-                return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
-            });
+            if (SETTINGS.code) {
+                html = html.replace(/(`+)(.*?)\1/g, (match, tick, content) => {
+                    codeBlocks.push(`<code>${content}</code>`);
+                    return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
+                });
+            }
 
             // LaTeX 수식
-            if (typeof katex !== 'undefined') {
+            if (SETTINGS.latex && typeof katex !== 'undefined') {
                 html = html.replace(/(?<!\\)\$([^$]+?)\$/g, (match, latex) => {
                     try {
                         const cleanLatex = latex.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
@@ -94,20 +116,27 @@
             }
 
             // Markdown → Gemini 스타일
-            html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
-            html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<i>$1</i>');
-            html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
-            html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
+            if (SETTINGS.bold) html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+            if (SETTINGS.italic) html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<i>$1</i>');
+            if (SETTINGS.strike) html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
+            if (SETTINGS.underline) html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
 
             // 코드 블록 복구 & 줄바꿈
-            html = html.replace(/__CODE_BLOCK_(\d+)__/g, (m, i) => codeBlocks[i]);
+            if (SETTINGS.code) html = html.replace(/__CODE_BLOCK_(\d+)__/g, (m, i) => codeBlocks[i]);
             html = html.replace(/\n/g, '<br>');
 
             return html;
         },
 
         needsProcessing(rawText) {
-            return rawText.trim() && /\*|\$|`|~~|<u>/.test(rawText);
+            if (!rawText.trim()) return false;
+            const patterns = [];
+            if (SETTINGS.bold || SETTINGS.italic) patterns.push('\\*');
+            if (SETTINGS.latex) patterns.push('\\$');
+            if (SETTINGS.code) patterns.push('`');
+            if (SETTINGS.strike) patterns.push('~~');
+            if (SETTINGS.underline) patterns.push('<u>');
+            return patterns.length > 0 && new RegExp(patterns.join('|')).test(rawText);
         }
     };
 
@@ -140,7 +169,6 @@
                     case 'MS-CMARK-NODE':
                         return children;
                     default:
-                        // inline-code 클래스 처리
                         if (node.classList.contains('inline-code')) {
                             return `\`${children}\``;
                         }
@@ -158,13 +186,15 @@
 
             // 인라인 코드 보호
             const codeBlocks = [];
-            html = html.replace(/(`+)(.*?)\1/g, (match, tick, content) => {
-                codeBlocks.push(`<span class="inline-code">${content}</span>`);
-                return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
-            });
+            if (SETTINGS.code) {
+                html = html.replace(/(`+)(.*?)\1/g, (match, tick, content) => {
+                    codeBlocks.push(`<span class="inline-code">${content}</span>`);
+                    return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
+                });
+            }
 
             // LaTeX 수식
-            if (typeof katex !== 'undefined') {
+            if (SETTINGS.latex && typeof katex !== 'undefined') {
                 html = html.replace(/(?<!\\)\$([^$]+?)\$/g, (match, latex) => {
                     try {
                         const cleanLatex = latex.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
@@ -174,20 +204,27 @@
             }
 
             // Markdown → AI Studio 스타일
-            html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-            html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<span style="font-style:italic">$1</span>');
-            html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
-            html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
+            if (SETTINGS.bold) html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            if (SETTINGS.italic) html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<span style="font-style:italic">$1</span>');
+            if (SETTINGS.strike) html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
+            if (SETTINGS.underline) html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
 
             // 코드 블록 복구 & 줄바꿈
-            html = html.replace(/__CODE_BLOCK_(\d+)__/g, (m, i) => codeBlocks[i]);
+            if (SETTINGS.code) html = html.replace(/__CODE_BLOCK_(\d+)__/g, (m, i) => codeBlocks[i]);
             html = html.replace(/\n/g, '<br>');
 
             return html;
         },
 
         needsProcessing(rawText) {
-            return rawText.trim() && /\*|\$|`|~~|<u>/.test(rawText);
+            if (!rawText.trim()) return false;
+            const patterns = [];
+            if (SETTINGS.bold || SETTINGS.italic) patterns.push('\\*');
+            if (SETTINGS.latex) patterns.push('\\$');
+            if (SETTINGS.code) patterns.push('`');
+            if (SETTINGS.strike) patterns.push('~~');
+            if (SETTINGS.underline) patterns.push('<u>');
+            return patterns.length > 0 && new RegExp(patterns.join('|')).test(rawText);
         }
     };
 

@@ -7,15 +7,15 @@ const aistudioConfig = {
     targetSelector: '.chat-session-content',
     elementSelector: 'p:not([data-rerendered="true"]), h1:not([data-rerendered="true"]), h2:not([data-rerendered="true"]), h3:not([data-rerendered="true"]), h4:not([data-rerendered="true"]), td:not([data-rerendered="true"]), th:not([data-rerendered="true"])',
     
-    // DOM → Raw Text 변환
-    serialize(node) {
+    // DOM → Raw Text 변환 (항상 마크다운 구문으로)
+    serialize(node, settings) {
         if (node.nodeType === Node.TEXT_NODE) {
             return node.nodeValue;
         }
 
         if (node.nodeType === Node.ELEMENT_NODE) {
             const tagName = node.tagName.toUpperCase();
-            const children = Array.from(node.childNodes).map(n => this.serialize(n)).join('');
+            const children = Array.from(node.childNodes).map(n => this.serialize(n, settings)).join('');
 
             switch (tagName) {
                 case 'EM':
@@ -49,7 +49,7 @@ const aistudioConfig = {
     },
 
     // Raw Text → HTML 변환 (AI Studio 스타일)
-    render(rawText) {
+    render(rawText, settings) {
         let html = rawText
             .replace(/&/g, "&amp;")
             .replace(/</g, "&lt;")
@@ -57,13 +57,15 @@ const aistudioConfig = {
 
         // 인라인 코드 보호
         const codeBlocks = [];
-        html = html.replace(/(`+)(.*?)\1/g, (match, tick, content) => {
-            codeBlocks.push(`<span class="inline-code">${content}</span>`);
-            return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
-        });
+        if (settings.code) {
+            html = html.replace(/(`+)(.*?)\1/g, (match, tick, content) => {
+                codeBlocks.push(`<span class="inline-code">${content}</span>`);
+                return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
+            });
+        }
 
         // 2. LaTeX 수식
-        if (typeof katex !== 'undefined') {
+        if (settings.latex && typeof katex !== 'undefined') {
             html = html.replace(/(?<!\\)\$([^$]+?)\$/g, (match, latex) => {
                 try {
                     const cleanLatex = latex
@@ -82,13 +84,13 @@ const aistudioConfig = {
         }
 
         // 3. Markdown → AI Studio 스타일 HTML
-        html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-        html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<span style="font-style:italic">$1</span>');
-        html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
-        html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
+        if (settings.bold) html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+        if (settings.italic) html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<span style="font-style:italic">$1</span>');
+        if (settings.strike) html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
+        if (settings.underline) html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
 
         // 4. 코드 블록 복구
-        html = html.replace(/__CODE_BLOCK_(\d+)__/g, (m, i) => codeBlocks[i]);
+        if (settings.code) html = html.replace(/__CODE_BLOCK_(\d+)__/g, (m, i) => codeBlocks[i]);
 
         // 5. 줄바꿈
         html = html.replace(/\n/g, '<br>');
@@ -97,8 +99,15 @@ const aistudioConfig = {
     },
 
     // 처리 필요 여부 체크
-    needsProcessing(rawText) {
-        return rawText.trim() && /\*|\$|`|~~|<u>/.test(rawText);
+    needsProcessing(rawText, settings) {
+        if (!rawText.trim()) return false;
+        const patterns = [];
+        if (settings.bold || settings.italic) patterns.push('\\*');
+        if (settings.latex) patterns.push('\\$');
+        if (settings.code) patterns.push('`');
+        if (settings.strike) patterns.push('~~');
+        if (settings.underline) patterns.push('<u>');
+        return patterns.length > 0 && new RegExp(patterns.join('|')).test(rawText);
     }
 };
 

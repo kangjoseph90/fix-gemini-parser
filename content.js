@@ -2,6 +2,17 @@
 // 공통 실행기 (사이트별 로직은 sites/*.js에서 정의)
 // ============================================
 
+// 전역 설정 객체
+let SETTINGS = {
+    enabled: true,
+    latex: true,
+    bold: true,
+    italic: true,
+    strike: true,
+    underline: true,
+    code: true
+};
+
 let htmlPolicy = { createHTML: (string) => string };
 if (window.trustedTypes && window.trustedTypes.createPolicy) {
     try {
@@ -33,23 +44,25 @@ function createEngine(config) {
 
     // 메인 렌더링 함수
     function reRenderContent() {
+        if (!SETTINGS.enabled) return;
+        
         const container = document.querySelector(config.targetSelector);
         if (!container) return;
 
         const elements = container.querySelectorAll(config.elementSelector);
 
         elements.forEach(elem => {
-            // 사이트별 serialize 메소드 사용
-            const rawText = config.serialize(elem);
+            // 사이트별 serialize 메소드 사용 (SETTINGS 전달)
+            const rawText = config.serialize(elem, SETTINGS);
 
             // 사이트별 처리 필요 여부 체크
-            if (!config.needsProcessing(rawText)) {
+            if (!config.needsProcessing(rawText, SETTINGS)) {
                 elem.setAttribute('data-rerendered', 'true');
                 return;
             }
 
-            // 사이트별 render 메소드 사용
-            const newHtml = config.render(rawText);
+            // 사이트별 render 메소드 사용 (SETTINGS 전달)
+            const newHtml = config.render(rawText, SETTINGS);
 
             if (elem.innerHTML !== newHtml) {
                 elem.innerHTML = htmlPolicy.createHTML(newHtml);
@@ -84,11 +97,33 @@ function createEngine(config) {
     return { observe, reRenderContent };
 }
 
-// 엔진 초기화
-const siteConfig = detectSiteConfig();
-if (siteConfig) {
-    const engine = createEngine(siteConfig);
-    engine.observe();
-} else {
-    console.warn('[ReRender] Extension disabled - unsupported site');
-}
+// 설정 불러오기 및 엔진 시작
+chrome.storage.sync.get(SETTINGS, (stored) => {
+    SETTINGS = { ...SETTINGS, ...stored };
+    
+    if (!SETTINGS.enabled) {
+        console.log('[ReRender] Extension disabled by user');
+        return;
+    }
+    
+    const siteConfig = detectSiteConfig();
+    if (siteConfig) {
+        const engine = createEngine(siteConfig);
+        engine.observe();
+        
+        // 설정 변경 리스너
+        chrome.runtime.onMessage.addListener((message) => {
+            if (message.type === 'settingsUpdated') {
+                SETTINGS = message.settings;
+                // 기존 렌더링 마크 제거하여 재렌더링 트리거
+                document.querySelectorAll('[data-rerendered]').forEach(el => {
+                    el.removeAttribute('data-rerendered');
+                });
+                engine.reRenderContent();
+                console.log('[ReRender] Settings updated:', SETTINGS);
+            }
+        });
+    } else {
+        console.warn('[ReRender] Extension disabled - unsupported site');
+    }
+});
