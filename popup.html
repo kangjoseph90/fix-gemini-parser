@@ -2,110 +2,73 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="popup.css">
 </head>
 <body>
     <div class="container">
-        <div class="header">
-            <h1>🔧 Fix Parser</h1>
-            <p class="subtitle">마크다운 & 수식 파서 설정</p>
+        <!-- Main Header with Toggle -->
+        <div class="header-row">
+            <h1>Fix Parser</h1>
+            <label class="switch main-switch">
+                <input type="checkbox" id="enabled" checked>
+                <span class="slider"></span>
+            </label>
         </div>
 
-        <div class="toggle-section">
-            <div class="toggle-item main-toggle">
-                <div class="toggle-info">
-                    <span class="toggle-icon">⚡</span>
-                    <span class="toggle-label">확장 프로그램 활성화</span>
-                </div>
-                <label class="switch">
-                    <input type="checkbox" id="enabled" checked>
-                    <span class="slider"></span>
-                </label>
-            </div>
-        </div>
-
-        <div class="divider"></div>
-
-        <div class="toggle-section" id="options-section">
-            <div class="section-title">파싱 옵션</div>
-            
-            <div class="toggle-item">
-                <div class="toggle-info">
-                    <span class="toggle-icon">∑</span>
-                    <span class="toggle-label">LaTeX 수식</span>
-                    <span class="toggle-hint">$...$</span>
-                </div>
+        <!-- Options List -->
+        <div class="options-list" id="options-section">
+            <div class="option-item">
+                <span class="label">LaTeX Math</span>
                 <label class="switch">
                     <input type="checkbox" id="latex" checked>
                     <span class="slider"></span>
                 </label>
             </div>
 
-            <div class="toggle-item">
-                <div class="toggle-info">
-                    <span class="toggle-icon">B</span>
-                    <span class="toggle-label">볼드</span>
-                    <span class="toggle-hint">**...**</span>
-                </div>
+            <div class="option-item">
+                <span class="label">Bold</span>
                 <label class="switch">
                     <input type="checkbox" id="bold" checked>
                     <span class="slider"></span>
                 </label>
             </div>
 
-            <div class="toggle-item">
-                <div class="toggle-info">
-                    <span class="toggle-icon">𝐼</span>
-                    <span class="toggle-label">이탤릭</span>
-                    <span class="toggle-hint">*...*</span>
-                </div>
+            <div class="option-item">
+                <span class="label">Italic</span>
                 <label class="switch">
                     <input type="checkbox" id="italic" checked>
                     <span class="slider"></span>
                 </label>
             </div>
 
-            <div class="toggle-item">
-                <div class="toggle-info">
-                    <span class="toggle-icon">S̶</span>
-                    <span class="toggle-label">취소선</span>
-                    <span class="toggle-hint">~~...~~</span>
-                </div>
+            <div class="option-item">
+                <span class="label">Strikethrough</span>
                 <label class="switch">
                     <input type="checkbox" id="strike" checked>
                     <span class="slider"></span>
                 </label>
             </div>
 
-            <div class="toggle-item">
-                <div class="toggle-info">
-                    <span class="toggle-icon">U̲</span>
-                    <span class="toggle-label">밑줄</span>
-                    <span class="toggle-hint">&lt;u&gt;...&lt;/u&gt;</span>
-                </div>
+            <div class="option-item">
+                <span class="label">Underline</span>
                 <label class="switch">
                     <input type="checkbox" id="underline" checked>
                     <span class="slider"></span>
                 </label>
             </div>
 
-            <div class="toggle-item">
-                <div class="toggle-info">
-                    <span class="toggle-icon">&lt;/&gt;</span>
-                    <span class="toggle-label">인라인 코드</span>
-                    <span class="toggle-hint">`...`</span>
-                </div>
+            <div class="option-item">
+                <span class="label">Inline Code</span>
                 <label class="switch">
                     <input type="checkbox" id="code" checked>
                     <span class="slider"></span>
                 </label>
             </div>
         </div>
-
-        <div class="footer">
-            <span class="version">v3.2</span>
-            <span class="status" id="status">설정 저장됨</span>
-        </div>
+        
+        <!-- Hidden status element for JS compatibility -->
+        <div id="status" style="display: none;"></div>
     </div>
     <script src="popup.js"></script>
 </body>
