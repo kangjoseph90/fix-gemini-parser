@@ -1,4 +1,6 @@
-const targetSelector = '.chat-container'; 
+// ============================================
+// 공통 실행기 (사이트별 로직은 sites/*.js에서 정의)
+// ============================================
 
 let htmlPolicy = { createHTML: (string) => string };
 if (window.trustedTypes && window.trustedTypes.createPolicy) {
@@ -9,143 +11,84 @@ if (window.trustedTypes && window.trustedTypes.createPolicy) {
     } catch (e) { console.warn(e); }
 }
 
-function serializeToRawText(node) {
-    // 1. 텍스트 노드면 값 그대로 반환
-    if (node.nodeType === Node.TEXT_NODE) {
-        return node.nodeValue;
+// 현재 사이트에 맞는 config 찾기
+function detectSiteConfig() {
+    const hostname = window.location.hostname;
+    const configs = window.siteConfigs || [];
+    
+    for (const config of configs) {
+        if (config.hostPattern.test(hostname)) {
+            console.log(`[ReRender] Detected site: ${config.name}`);
+            return config;
+        }
     }
-
-    // 2. 요소 노드 처리
-    if (node.nodeType === Node.ELEMENT_NODE) {
-        const tagName = node.tagName.toUpperCase();
-
-        // <i> 태그 -> *내용*
-        if (tagName === 'I' || tagName === 'EM') {
-            return `*${Array.from(node.childNodes).map(serializeToRawText).join('')}*`;
-        }
-
-        // <b>, <strong> 태그 -> **내용**
-        if (tagName === 'B' || tagName === 'STRONG') {
-            return `**${Array.from(node.childNodes).map(serializeToRawText).join('')}**`;
-        }
-
-        // <br> 태그 -> 줄바꿈
-        if (tagName === 'BR') {
-            return '\n';
-        }
-
-        // <span class="math-inline"> -> $data-math값$
-        if (node.classList.contains('math-inline')) {
-            const mathData = node.getAttribute('data-math');
-            if (mathData) {
-                // data-math 값이 있으면 $...$ 로 감싸서 반환
-                return `$${mathData}$`;
-            }
-            // data-math가 없으면 내부 텍스트라도 건짐
-        }
-
-        // 그 외 일반 태그(span 등)는 껍데기 벗기고 내용물만 재귀적으로 수집
-        return Array.from(node.childNodes).map(serializeToRawText).join('');
-    }
-
-    return '';
+    
+    console.warn('[ReRender] No matching site config found for:', hostname);
+    return null;
 }
 
-function parseAndRender(rawText) {
-    let processedHtml = rawText
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
+// 엔진 생성 함수
+function createEngine(config) {
+    if (!config) return null;
 
-    // 1. 인라인 코드 보호 (`...`) 
-    // 코드 블록 안의 *, $ 가 파싱되는 것을 방지
-    const codeBlocks = [];
-    processedHtml = processedHtml.replace(/(`+)(.*?)\1/g, (match, tick, content) => {
-        codeBlocks.push(`<code style="background:#eee; padding:2px 4px; border-radius:3px; font-family:monospace;">${content}</code>`);
-        return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
-    });
+    // 메인 렌더링 함수
+    function reRenderContent() {
+        const container = document.querySelector(config.targetSelector);
+        if (!container) return;
 
-    // 2. LaTeX 수식 파싱 ($...$)
-    if (typeof katex !== 'undefined') {
-        processedHtml = processedHtml.replace(/(?<!\\)\$([^$]+?)\$/g, (match, latex) => {
-            try {
-                // HTML entity로 변환된 문자들을 다시 되돌려야 KaTeX가 인식함 (&lt; -> <)
-                const cleanLatex = latex
-                    .replace(/&lt;/g, "<")
-                    .replace(/&gt;/g, ">")
-                    .replace(/&amp;/g, "&");
+        const elements = container.querySelectorAll(config.elementSelector);
 
-                const rendered = katex.renderToString(cleanLatex, {
-                    throwOnError: false,
-                    output: 'html',
-                    displayMode: false
-                });
-                return `<span class="math-inline-wrapper">${rendered}</span>`;
-            } catch (e) {
-                return match;
+        elements.forEach(elem => {
+            // 사이트별 serialize 메소드 사용
+            const rawText = config.serialize(elem);
+
+            // 사이트별 처리 필요 여부 체크
+            if (!config.needsProcessing(rawText)) {
+                elem.setAttribute('data-rerendered', 'true');
+                return;
             }
+
+            // 사이트별 render 메소드 사용
+            const newHtml = config.render(rawText);
+
+            if (elem.innerHTML !== newHtml) {
+                elem.innerHTML = htmlPolicy.createHTML(newHtml);
+            }
+            
+            elem.setAttribute('data-rerendered', 'true');
         });
     }
 
-    // 3. Markdown 서식 파싱
-    // **Bold**
-    processedHtml = processedHtml.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
-    // *Italic* (Step 1에서 i 태그를 *로 바꿨으므로 여기서 다시 i 태그로 복구됨)
-    processedHtml = processedHtml.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<i>$1</i>');
+    // MutationObserver 시작
+    function observe() {
+        const observer = new MutationObserver((mutations) => {
+            const needsUpdate = mutations.some(m => 
+                m.addedNodes.length > 0 || 
+                (m.type === 'childList' && ['P', 'H1', 'H2', 'H3', 'H4'].includes(m.target.tagName))
+            );
+            if (needsUpdate) reRenderContent();
+        });
 
-    // 4. 코드 블록 복구
-    processedHtml = processedHtml.replace(/__CODE_BLOCK_(\d+)__/g, (match, index) => {
-        return codeBlocks[index];
-    });
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            characterData: true
+        });
 
-    // 5. 줄바꿈 처리
-    processedHtml = processedHtml.replace(/\n/g, '<br>');
-
-    return processedHtml;
-}
-
-function reRenderContent() {
-    const container = document.querySelector(targetSelector);
-    if (!container) return;
-
-    // 아직 건드리지 않은 p, h1~h4 태그들 수집
-    const elements = container.querySelectorAll('p:not([data-rerendered="true"]), h1:not([data-rerendered="true"]), h2:not([data-rerendered="true"]), h3:not([data-rerendered="true"]), h4:not([data-rerendered="true"])');
-
-    elements.forEach(elem => {
-        // 기존 DOM 해체
-        const rawText = serializeToRawText(elem);
-
-        // 바꿀거 없으면 스킵
-        if (!rawText.trim() || !rawText.match(/\*|\$|`/)) {
-            elem.setAttribute('data-rerendered', 'true');
-            return;
-        }
-
-        // 텍스트 재렌더링
-        const newHtml = parseAndRender(rawText);
-
-        // DOM 덮어씌우기
-        if (elem.innerHTML !== newHtml) {
-            elem.innerHTML = htmlPolicy.createHTML(newHtml);
-        }
+        // 초기 실행
+        reRenderContent();
         
-        // 처리 완료 표시
-        elem.setAttribute('data-rerendered', 'true');
-    });
+        console.log(`[ReRender] Engine started for ${config.name}`);
+    }
+
+    return { observe, reRenderContent };
 }
 
-const observer = new MutationObserver((mutations) => {
-    const needsUpdate = mutations.some(m => 
-        m.addedNodes.length > 0 || 
-        (m.type === 'childList' && ['P', 'H1', 'H2', 'H3', 'H4'].includes(m.target.tagName))
-    );
-    if (needsUpdate) reRenderContent();
-});
-
-observer.observe(document.body, {
-    childList: true,
-    subtree: true,
-    characterData: true
-});
-
-reRenderContent();
+// 엔진 초기화
+const siteConfig = detectSiteConfig();
+if (siteConfig) {
+    const engine = createEngine(siteConfig);
+    engine.observe();
+} else {
+    console.warn('[ReRender] Extension disabled - unsupported site');
+}
