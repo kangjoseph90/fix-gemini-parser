@@ -71,7 +71,7 @@ const aistudioConfig = {
                         .replace(/&gt;/g, ">")
                         .replace(/&amp;/g, "&");
                     return katex.renderToString(cleanLatex, {
-                        throwOnError: false,
+                        throwOnError: true,
                         output: 'html',
                         displayMode: false
                     });
