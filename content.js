@@ -49,6 +49,9 @@ function createEngine(config) {
         const container = document.querySelector(config.targetSelector);
         if (!container) return;
 
+        // 스트리밍 중인 요소가 있으면 전체 건너뛰기
+        if (container.querySelector('.pending, .animating')) return;
+
         const elements = container.querySelectorAll(config.elementSelector);
 
         elements.forEach(elem => {
