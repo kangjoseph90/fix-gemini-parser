@@ -88,7 +88,7 @@
                 html = html.replace(/(?<!\\)\$([^$]+?)\$/g, (match, latex) => {
                     try {
                         const cleanLatex = latex.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-                        return katex.renderToString(cleanLatex, { throwOnError: false, output: 'html', displayMode: false });
+                        return katex.renderToString(cleanLatex, { throwOnError: true, output: 'html', displayMode: false });
                     } catch (e) { return match; }
                 });
             }
@@ -166,7 +166,7 @@
                 html = html.replace(/(?<!\\)\$([^$]+?)\$/g, (match, latex) => {
                     try {
                         const cleanLatex = latex.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-                        return katex.renderToString(cleanLatex, { throwOnError: false, output: 'html', displayMode: false });
+                        return katex.renderToString(cleanLatex, { throwOnError: true, output: 'html', displayMode: false });
                     } catch (e) { return match; }
                 });
             }
