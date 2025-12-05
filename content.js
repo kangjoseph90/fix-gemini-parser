@@ -1,4 +1,4 @@
-const targetSelector = '.content-container'; 
+const targetSelector = '.chat-container'; 
 
 let htmlPolicy = { createHTML: (string) => string };
 if (window.trustedTypes && window.trustedTypes.createPolicy) {

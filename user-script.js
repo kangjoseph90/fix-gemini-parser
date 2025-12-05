@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini Math & Markdown Fixer
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @description  Google Gemini 모바일/PC 웹에서 깨지는 수식($...$)과 볼드체(**...**)를 강제로 고쳐줍니다.
 // @author       My AI Partner
 // @match        https://gemini.google.com/*
@@ -25,7 +25,7 @@
     `);
 
     // 설정: 감시할 컨테이너
-    const targetSelector = '.content-container';
+    const targetSelector = '.chat-container';
 
     // 보안 정책 우회 (모바일은 보통 필요 없지만 혹시 몰라 넣어둠)
     let htmlPolicy = { createHTML: (string) => string };
