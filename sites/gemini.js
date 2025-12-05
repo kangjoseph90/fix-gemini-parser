@@ -76,6 +76,8 @@ const geminiConfig = {
         // 3. Markdown → Gemini 스타일 HTML
         html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
         html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<i>$1</i>');
+        html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
+        html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
 
         // 4. 코드 블록 복구
         html = html.replace(/__CODE_BLOCK_(\d+)__/g, (m, i) => codeBlocks[i]);
@@ -88,7 +90,7 @@ const geminiConfig = {
 
     // 처리 필요 여부 체크
     needsProcessing(rawText) {
-        return rawText.trim() && /\*|\$|`/.test(rawText);
+        return rawText.trim() && /\*|\$|`|~~|<u>/.test(rawText);
     }
 };
 

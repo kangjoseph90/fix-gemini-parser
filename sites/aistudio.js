@@ -82,12 +82,10 @@ const aistudioConfig = {
         }
 
         // 3. Markdown → AI Studio 스타일 HTML
-        // **Bold** → <strong>
         html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-        // *Italic* → <span style="font-style:italic">
         html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<span style="font-style:italic">$1</span>');
-        // ~~Strikethrough~~ → <s>
         html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
+        html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
 
         // 4. 코드 블록 복구
         html = html.replace(/__CODE_BLOCK_(\d+)__/g, (m, i) => codeBlocks[i]);
@@ -100,7 +98,7 @@ const aistudioConfig = {
 
     // 처리 필요 여부 체크
     needsProcessing(rawText) {
-        return rawText.trim() && /\*|\$|`|~~/.test(rawText);
+        return rawText.trim() && /\*|\$|`|~~|<u>/.test(rawText);
     }
 };
 
