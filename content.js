@@ -77,7 +77,7 @@ function render(text) {
     const codes = [];
     if (SETTINGS.code) {
         html = html.replace(/(`+)(.*?)\1/g, (_, tick, content) => {
-            codes.push(`<code>${content}</code>`);
+            codes.push(`<code class="gemini-parser-code">${content}</code>`);
             return `__CODE_${codes.length - 1}__`;
         });
     }
@@ -95,7 +95,7 @@ function render(text) {
                     output: 'html',
                     displayMode: false
                 });
-                return `<span class="math-inline" data-math="${clean}">${rendered}</span>`;
+                return `<span class="math-inline gemini-parser-math" data-math="${clean}">${rendered}</span>`;
             } catch {
                 return match;
             }
@@ -103,10 +103,10 @@ function render(text) {
     }
 
     // 3. 마크다운 서식
-    if (SETTINGS.bold) html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
-    if (SETTINGS.italic) html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<i>$1</i>');
-    if (SETTINGS.strike) html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
-    if (SETTINGS.underline) html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
+    if (SETTINGS.bold) html = html.replace(/\*\*(.*?)\*\*/g, '<b class="gemini-parser-bold">$1</b>');
+    if (SETTINGS.italic) html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<i class="gemini-parser-italic">$1</i>');
+    if (SETTINGS.strike) html = html.replace(/~~(.*?)~~/g, '<s class="gemini-parser-strike">$1</s>');
+    if (SETTINGS.underline) html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u class="gemini-parser-underline">$1</u>');
 
     // 4. 코드 복구
     if (SETTINGS.code) {
