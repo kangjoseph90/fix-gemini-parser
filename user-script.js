@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         AI Chat Math & Markdown Fixer
+// @name         Fix Gemini Parser
 // @namespace    http://tampermonkey.net/
 // @version      3.0
 // @description  Gemini, AI Studio 등에서 깨지는 수식($...$)과 마크다운을 고쳐줍니다.
-// @author       My AI Partner
+// @author       kangjoseph90
 // @match        https://gemini.google.com/*
 // @match        https://aistudio.google.com/*
 // @grant        GM_addStyle
