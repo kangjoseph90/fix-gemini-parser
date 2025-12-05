@@ -101,13 +101,7 @@ const aistudioConfig = {
     // 처리 필요 여부 체크
     needsProcessing(rawText, settings) {
         if (!rawText.trim()) return false;
-        const patterns = [];
-        if (settings.bold || settings.italic) patterns.push('\\*');
-        if (settings.latex) patterns.push('\\$');
-        if (settings.code) patterns.push('`');
-        if (settings.strike) patterns.push('~~');
-        if (settings.underline) patterns.push('<u>');
-        return patterns.length > 0 && new RegExp(patterns.join('|')).test(rawText);
+        return new RegExp('\\*|\\$|`|~~|<u>').test(rawText);
     }
 };
 

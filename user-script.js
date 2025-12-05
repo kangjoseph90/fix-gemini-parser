@@ -130,13 +130,7 @@
 
         needsProcessing(rawText) {
             if (!rawText.trim()) return false;
-            const patterns = [];
-            if (SETTINGS.bold || SETTINGS.italic) patterns.push('\\*');
-            if (SETTINGS.latex) patterns.push('\\$');
-            if (SETTINGS.code) patterns.push('`');
-            if (SETTINGS.strike) patterns.push('~~');
-            if (SETTINGS.underline) patterns.push('<u>');
-            return patterns.length > 0 && new RegExp(patterns.join('|')).test(rawText);
+            return new RegExp('\\*|\\$|`|~~|<u>').test(rawText);
         }
     };
 
@@ -218,13 +212,7 @@
 
         needsProcessing(rawText) {
             if (!rawText.trim()) return false;
-            const patterns = [];
-            if (SETTINGS.bold || SETTINGS.italic) patterns.push('\\*');
-            if (SETTINGS.latex) patterns.push('\\$');
-            if (SETTINGS.code) patterns.push('`');
-            if (SETTINGS.strike) patterns.push('~~');
-            if (SETTINGS.underline) patterns.push('<u>');
-            return patterns.length > 0 && new RegExp(patterns.join('|')).test(rawText);
+            return new RegExp('\\*|\\$|`|~~|<u>').test(rawText);
         }
     };
 
