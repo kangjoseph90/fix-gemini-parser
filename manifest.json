@@ -4,9 +4,16 @@
   "version": "3.3",
   "description": "Gemini에서 깨지는 수식과 마크다운을 고쳐줍니다.",
   "permissions": ["storage"],
+  "icons": {
+    "16": "app.png",
+    "32": "app.png",
+    "48": "app.png",
+    "128": "app.png"
+  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Fix Parser 설정"
+    "default_title": "Fix Parser 설정",
+    "default_icon": "app.png"
   },
   "content_scripts": [
     {
