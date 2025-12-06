@@ -13,6 +13,16 @@ let SETTINGS = {
     code: true
 };
 
+// 색상 설정
+let COLOR_SETTINGS = {
+    boldColor: null,
+    italicColor: null,
+    strikeColor: null,
+    underlineColor: null,
+    codeColor: null,
+    mathColor: null
+};
+
 // Trusted Types 정책
 let htmlPolicy = { createHTML: (s) => s };
 if (window.trustedTypes?.createPolicy) {
@@ -21,6 +31,63 @@ if (window.trustedTypes?.createPolicy) {
             createHTML: (s) => s
         });
     } catch (e) { console.warn(e); }
+}
+
+// 커스텀 스타일 요소
+let customStyleEl = null;
+
+// ==================================
+// 커스텀 스타일 주입
+// ==================================
+function injectCustomStyles() {
+    if (!customStyleEl) {
+        customStyleEl = document.createElement('style');
+        customStyleEl.id = 'gemini-parser-custom-styles';
+        document.head.appendChild(customStyleEl);
+    }
+
+    let css = '';
+
+    // 헬퍼 함수: 각 스타일 항목 CSS 생성
+    function buildStyleRule(selector, colorData) {
+        if (!colorData) return '';
+        
+        let rule = `${selector} { `;
+        
+        // 기본 색상과 투명도
+        if (colorData.color) {
+            rule += `color: ${colorData.color} !important; `;
+        }
+        if (colorData.opacity !== undefined && colorData.opacity !== 100) {
+            rule += `opacity: ${colorData.opacity / 100} !important; `;
+        }
+        
+        // 커스텀 CSS 추가
+        if (colorData.customCss) {
+            // 각 속성에 !important 추가 (없는 경우)
+            const customRules = colorData.customCss
+                .split(';')
+                .map(r => r.trim())
+                .filter(r => r)
+                .map(r => r.includes('!important') ? r : r + ' !important')
+                .join('; ');
+            if (customRules) {
+                rule += customRules + '; ';
+            }
+        }
+        
+        rule += '}\n';
+        return rule;
+    }
+
+    css += buildStyleRule('.gemini-parser-bold', COLOR_SETTINGS.boldColor);
+    css += buildStyleRule('.gemini-parser-italic', COLOR_SETTINGS.italicColor);
+    css += buildStyleRule('.gemini-parser-strike', COLOR_SETTINGS.strikeColor);
+    css += buildStyleRule('.gemini-parser-underline', COLOR_SETTINGS.underlineColor);
+    css += buildStyleRule('.gemini-parser-code', COLOR_SETTINGS.codeColor);
+    css += buildStyleRule('.gemini-parser-math', COLOR_SETTINGS.mathColor);
+
+    customStyleEl.textContent = css;
 }
 
 // ==================================
@@ -167,13 +234,40 @@ function reRender() {
 // ==================================
 // 초기화
 // ==================================
-chrome.storage.sync.get(SETTINGS, (stored) => {
-    SETTINGS = { ...SETTINGS, ...stored };
+const ALL_KEYS = [
+    'enabled', 'latex', 'bold', 'italic', 'strike', 'underline', 'code',
+    'boldColor', 'italicColor', 'strikeColor', 'underlineColor', 'codeColor', 'mathColor'
+];
+
+chrome.storage.sync.get(ALL_KEYS, (stored) => {
+    // 설정 적용
+    SETTINGS = {
+        enabled: stored.enabled ?? true,
+        latex: stored.latex ?? true,
+        bold: stored.bold ?? true,
+        italic: stored.italic ?? true,
+        strike: stored.strike ?? true,
+        underline: stored.underline ?? true,
+        code: stored.code ?? true
+    };
+
+    // 색상 설정 적용
+    COLOR_SETTINGS = {
+        boldColor: stored.boldColor ?? null,
+        italicColor: stored.italicColor ?? null,
+        strikeColor: stored.strikeColor ?? null,
+        underlineColor: stored.underlineColor ?? null,
+        codeColor: stored.codeColor ?? null,
+        mathColor: stored.mathColor ?? null
+    };
 
     if (!SETTINGS.enabled) {
-        console.log('[Gemini Parser] 비활성화됨');
+        console.log('[Gemini Parser] Disabled');
         return;
     }
+
+    // 커스텀 스타일 주입
+    injectCustomStyles();
 
     // DOM 변경 감지
     new MutationObserver(() => reRender()).observe(document.body, {
@@ -182,12 +276,35 @@ chrome.storage.sync.get(SETTINGS, (stored) => {
     });
 
     reRender();
-    console.log('[Gemini Parser] 시작됨');
+    console.log('[Gemini Parser] Started');
 
     // 설정 변경 리스너
     chrome.runtime.onMessage.addListener((msg) => {
         if (msg.type === 'settingsUpdated') {
-            SETTINGS = msg.settings;
+            const s = msg.settings;
+            
+            SETTINGS = {
+                enabled: s.enabled ?? SETTINGS.enabled,
+                latex: s.latex ?? SETTINGS.latex,
+                bold: s.bold ?? SETTINGS.bold,
+                italic: s.italic ?? SETTINGS.italic,
+                strike: s.strike ?? SETTINGS.strike,
+                underline: s.underline ?? SETTINGS.underline,
+                code: s.code ?? SETTINGS.code
+            };
+
+            COLOR_SETTINGS = {
+                boldColor: s.boldColor ?? null,
+                italicColor: s.italicColor ?? null,
+                strikeColor: s.strikeColor ?? null,
+                underlineColor: s.underlineColor ?? null,
+                codeColor: s.codeColor ?? null,
+                mathColor: s.mathColor ?? null
+            };
+
+            // 커스텀 스타일 재주입
+            injectCustomStyles();
+
             document.querySelectorAll('[data-rendered]').forEach(el => {
                 el.removeAttribute('data-rendered');
             });

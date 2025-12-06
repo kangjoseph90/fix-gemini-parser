@@ -17,17 +17,12 @@
         </div>
 
         <!-- Options List -->
-        <div class="options-list" id="options-section">
+        <div class="options-list" id="options-section">          
             <div class="option-item">
-                <span class="label">LaTeX Math</span>
-                <label class="switch">
-                    <input type="checkbox" id="latex" checked>
-                    <span class="slider"></span>
-                </label>
-            </div>
-
-            <div class="option-item">
-                <span class="label">Bold</span>
+                <div class="label-group">
+                    <span class="label">Bold</span>
+                    <button class="color-btn" data-key="boldColor" title="Color Settings"></button>
+                </div>
                 <label class="switch">
                     <input type="checkbox" id="bold" checked>
                     <span class="slider"></span>
@@ -35,7 +30,10 @@
             </div>
 
             <div class="option-item">
-                <span class="label">Italic</span>
+                <div class="label-group">
+                    <span class="label">Italic</span>
+                    <button class="color-btn" data-key="italicColor" title="Color Settings"></button>
+                </div>
                 <label class="switch">
                     <input type="checkbox" id="italic" checked>
                     <span class="slider"></span>
@@ -43,7 +41,10 @@
             </div>
 
             <div class="option-item">
-                <span class="label">Strikethrough</span>
+                <div class="label-group">
+                    <span class="label">Strikethrough</span>
+                    <button class="color-btn" data-key="strikeColor" title="Color Settings"></button>
+                </div>
                 <label class="switch">
                     <input type="checkbox" id="strike" checked>
                     <span class="slider"></span>
@@ -51,7 +52,10 @@
             </div>
 
             <div class="option-item">
-                <span class="label">Underline</span>
+                <div class="label-group">
+                    <span class="label">Underline</span>
+                    <button class="color-btn" data-key="underlineColor" title="Color Settings"></button>
+                </div>
                 <label class="switch">
                     <input type="checkbox" id="underline" checked>
                     <span class="slider"></span>
@@ -59,11 +63,73 @@
             </div>
 
             <div class="option-item">
-                <span class="label">Inline Code</span>
+                <div class="label-group">
+                    <span class="label">Inline Code</span>
+                    <button class="color-btn" data-key="codeColor" title="Color Settings"></button>
+                </div>
                 <label class="switch">
                     <input type="checkbox" id="code" checked>
                     <span class="slider"></span>
                 </label>
+            </div>
+
+            <div class="option-item">
+                <div class="label-group">
+                    <span class="label">LaTeX Math</span>
+                    <button class="color-btn" data-key="mathColor" title="Color Settings"></button>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="latex" checked>
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+
+        <!-- Color Picker Modal -->
+        <div id="color-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 id="modal-title">Style Settings</h3>
+                    <button id="close-modal-btn" class="icon-btn" title="Close">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                    </button>
+                </div>
+                
+                <!-- Basic Settings -->
+                <div id="basic-settings">
+                    <div class="color-control">
+                        <label>Color</label>
+                        <input type="color" id="color-input" value="#ffffff">
+                    </div>
+                    <div class="color-control">
+                        <label>Opacity: <span id="opacity-value">100%</span></label>
+                        <input type="range" id="opacity-input" min="0" max="100" value="100">
+                    </div>
+                    <div class="color-preview-box">
+                        <span>Preview:</span>
+                        <span id="preview-text">Sample Text</span>
+                    </div>
+                </div>
+
+                <!-- Advanced Settings Toggle -->
+                <button id="advanced-toggle" class="btn-link">▼ Advanced Settings</button>
+                
+                <!-- Advanced Settings (Custom CSS) -->
+                <div id="advanced-settings" class="hidden">
+                    <div class="color-control">
+                        <label>Custom CSS</label>
+                        <textarea id="custom-css-input" placeholder="color: red !important;&#10;font-weight: 900;"></textarea>
+                    </div>
+                    <p class="hint">Enter properties without selector.</p>
+                </div>
+
+                <div class="modal-actions">
+                    <button id="reset-btn" class="btn-secondary">Reset</button>
+                    <button id="save-btn" class="btn-primary">Save</button>
+                </div>
             </div>
         </div>
         

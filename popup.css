@@ -4,7 +4,7 @@
     --bg: #ffffff;
     --text: #171717;
     --text-sub: #737373;
-    --border: #f5f5f5;
+    --border: #e5e5e5;
     --active: #000000;
     --switch-bg: #e5e5e5;
 }
@@ -20,7 +20,7 @@ body {
     font-family: 'Inter', sans-serif;
     background-color: var(--bg);
     color: var(--text);
-    width: 260px; /* Compact width */
+    width: 280px;
     padding: 24px;
 }
 
@@ -56,7 +56,13 @@ h1 {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    height: 24px; /* Fixed height for alignment */
+    height: 24px;
+}
+
+.label-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 .label {
@@ -64,6 +70,28 @@ h1 {
     font-weight: 400;
     color: var(--text-sub);
     letter-spacing: -0.01em;
+}
+
+/* Color Button */
+.color-btn {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border);
+    background-color: transparent;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    padding: 0;
+}
+
+.color-btn:hover {
+    transform: scale(1.15);
+    border-color: var(--text-sub);
+}
+
+.color-btn.has-color {
+    border-color: transparent;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.1);
 }
 
 /* Minimal Switch */
@@ -124,4 +152,235 @@ input:checked + .slider:before {
 .option-item:hover .label {
     color: var(--text);
     transition: color 0.2s;
+}
+
+/* Modal Styles - Full screen within popup */
+.modal {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: var(--bg);
+    z-index: 1000;
+    opacity: 1;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+    transform: translateX(0);
+}
+
+.modal.hidden {
+    opacity: 0;
+    transform: translateX(10px);
+    pointer-events: none;
+}
+
+.modal-content {
+    background: var(--bg);
+    padding: 20px;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto; /* Enable scrolling */
+}
+
+/* Scrollbar styling for modal */
+.modal-content::-webkit-scrollbar {
+    width: 8px;
+}
+.modal-content::-webkit-scrollbar-thumb {
+    background-color: var(--border);
+    border-radius: 4px;
+}
+.modal-content::-webkit-scrollbar-track {
+    background-color: transparent;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px; /* Compact */
+    flex-shrink: 0;
+}
+
+.modal-content h3 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 0;
+}
+
+.icon-btn {
+    background: none;
+    border: none;
+    color: var(--text-sub);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+}
+
+.icon-btn:hover {
+    background-color: var(--border);
+    color: var(--text);
+}
+
+.color-control {
+    margin-bottom: 10px; /* Compact */
+    flex-shrink: 0;
+}
+
+.color-control label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-sub);
+    margin-bottom: 4px; /* Compact */
+}
+
+.color-control input[type="color"] {
+    width: 100%;
+    height: 32px; /* Compact */
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    padding: 2px;
+}
+
+.color-control input[type="range"] {
+    width: 100%;
+    height: 4px; /* Compact */
+    border-radius: 2px;
+    background: var(--switch-bg);
+    outline: none;
+    appearance: none;
+    -webkit-appearance: none;
+    margin: 8px 0;
+}
+
+.color-control input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px; /* Compact slider thumb */
+    height: 14px;
+    border-radius: 50%;
+    background: var(--active);
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.color-preview-box {
+    display: flex;
+    align-items: center;
+    justify-content: center; /* Center preview text */
+    gap: 10px;
+    padding: 10px; /* Compact */
+    background: #f9f9f9;
+    border-radius: 8px;
+    margin-bottom: 12px; /* Compact */
+    font-size: 13px;
+    color: var(--text-sub);
+    min-height: 48px;
+    flex-shrink: 0;
+}
+
+#preview-text {
+    font-weight: 500;
+}
+
+.modal-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: auto; /* Push to bottom if space permits */
+    padding-top: 12px;
+    flex-shrink: 0;
+}
+
+.modal-actions button {
+    flex: 1;
+    padding: 8px 0; /* Compact */
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-secondary {
+    background: var(--switch-bg);
+    color: var(--text);
+}
+
+.btn-secondary:hover {
+    background: #d5d5d5;
+}
+
+.btn-primary {
+    background: var(--active);
+    color: white;
+}
+
+.btn-primary:hover {
+    background: #333;
+}
+
+/* Advanced Toggle Button */
+.btn-link {
+    width: 100%;
+    background: none;
+    border: none;
+    color: var(--text-sub);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 4px 0;
+    margin-bottom: 8px;
+    text-align: left;
+    transition: color 0.2s ease;
+    flex-shrink: 0;
+}
+
+.btn-link:hover {
+    color: var(--text);
+}
+
+.btn-link.expanded {
+    color: var(--text);
+    font-weight: 500;
+}
+
+/* Advanced Settings */
+#advanced-settings {
+    margin-bottom: 12px;
+    flex-shrink: 0;
+}
+
+#advanced-settings.hidden {
+    display: none;
+}
+
+#custom-css-input {
+    width: 100%;
+    min-height: 60px; /* Compact */
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 11px;
+    resize: vertical;
+    background: #fafafa;
+    color: var(--text);
+}
+
+#custom-css-input:focus {
+    outline: none;
+    border-color: var(--active);
+}
+
+.hint {
+    font-size: 11px;
+    color: var(--text-sub);
+    margin-top: 4px;
 }
