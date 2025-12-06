@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Fix Gemini Parser",
   "version": "4.0",
-  "description": "Fixes broken math expressions and markdown in Gemini.",
+  "description": "Enhance your Google Gemini experience with proper markdown and LaTeX rendering.",
   "permissions": ["storage"],
   "icons": {
     "16": "app.png",
