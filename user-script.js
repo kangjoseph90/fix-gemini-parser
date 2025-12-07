@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Gemini Parser
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      4.1
 // @description  Gemini에서 깨지는 수식($...$)과 마크다운을 고쳐줍니다.
 // @author       kangjoseph90
 // @match        https://gemini.google.com/*
