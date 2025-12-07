@@ -238,7 +238,7 @@ function reRender() {
     if (!container) return;
 
     // 스트리밍 중이면 건너뛰기
-    if (container.querySelector('.pending, .animating, .loading')) return;
+    if (container.querySelector('.response-footer.animated')) return;
 
     container.querySelectorAll(SELECTOR).forEach(el => {
         const ctx = { preserved: [] };
