@@ -33,6 +33,20 @@ if (window.trustedTypes?.createPolicy) {
     } catch (e) { console.warn(e); }
 }
 
+// 플레이스홀더 패턴 (충돌 방지용 null 문자 사용)
+const PH = {
+    PREFIX: '\x00\x01GP_',
+    SUFFIX: '_\x01\x00',
+    CODE: (i) => `\x00\x01GP_CODE_${i}_\x01\x00`,
+    MATH: (i) => `\x00\x01GP_MATH_${i}_\x01\x00`,
+    ELEM: (i) => `\x00\x01GP_ELEM_${i}_\x01\x00`,
+    REGEX: {
+        CODE: /\x00\x01GP_CODE_(\d+)_\x01\x00/g,
+        MATH: /\x00\x01GP_MATH_(\d+)_\x01\x00/g,
+        ELEM: /\x00\x01GP_ELEM_(\d+)_\x01\x00/g
+    }
+};
+
 // 커스텀 스타일 요소
 let customStyleEl = null;
 
@@ -93,7 +107,7 @@ function injectCustomStyles() {
 // ==================================
 // DOM → Markdown 변환
 // ==================================
-function serialize(node) {
+function serialize(node, ctx = { preserved: [] }) {
     if (node.nodeType === Node.TEXT_NODE) {
         return node.nodeValue;
     }
@@ -102,8 +116,16 @@ function serialize(node) {
         return '';
     }
 
+    // 보존해야 할 요소 (화이트리스트)
+    if (node.tagName === 'RESPONSE-ELEMENT' ||
+        node.classList.contains('attachment-container')
+    ) {
+        const index = ctx.preserved.push(node.outerHTML) - 1;
+        return PH.ELEM(index);
+    }
+
     const tag = node.tagName;
-    const children = Array.from(node.childNodes).map(serialize).join('');
+    const children = Array.from(node.childNodes).map(c => serialize(c, ctx)).join('');
 
     switch (tag) {
         case 'I':
@@ -133,7 +155,7 @@ function serialize(node) {
 // ==================================
 // Markdown → HTML 변환
 // ==================================
-function render(text) {
+function render(text, preserved = []) {
     // HTML 이스케이프
     let html = text
         .replace(/&/g, '&amp;')
@@ -145,7 +167,7 @@ function render(text) {
     if (SETTINGS.code) {
         html = html.replace(/(`+)(.*?)\1/g, (_, tick, content) => {
             codes.push(`<code class="gemini-parser-code">${content}</code>`);
-            return `__CODE_${codes.length - 1}__`;
+            return PH.CODE(codes.length - 1);
         });
     }
 
@@ -164,7 +186,7 @@ function render(text) {
                     displayMode: false
                 });
                 maths.push(`<span class="math-inline gemini-parser-math" data-math="${clean}">${rendered}</span>`);
-                return `__MATH_${maths.length - 1}__`;
+                return PH.MATH(maths.length - 1);
             } catch {
                 return match;
             }
@@ -179,7 +201,7 @@ function render(text) {
 
     // 4. 코드 복구
     if (SETTINGS.code) {
-        html = html.replace(/__CODE_(\d+)__/g, (_, i) => codes[i]);
+        html = html.replace(PH.REGEX.CODE, (_, i) => codes[i]);
     }
 
     // 5. 줄바꿈
@@ -187,8 +209,11 @@ function render(text) {
 
     // 6. 수식 복구
     if (SETTINGS.latex) {
-        html = html.replace(/__MATH_(\d+)__/g, (_, i) => maths[i]);
+        html = html.replace(PH.REGEX.MATH, (_, i) => maths[i]);
     }
+
+    // 7. 보존된 요소 복구
+    html = html.replace(PH.REGEX.ELEM, (_, i) => preserved[i]);
 
     return html;
 }
@@ -216,14 +241,15 @@ function reRender() {
     if (container.querySelector('.pending, .animating')) return;
 
     container.querySelectorAll(SELECTOR).forEach(el => {
-        const markdown = serialize(el);
+        const ctx = { preserved: [] };
+        const markdown = serialize(el, ctx);
 
         if (!needsProcessing(markdown)) {
             el.setAttribute('data-rendered', '');
             return;
         }
 
-        const newHtml = render(markdown);
+        const newHtml = render(markdown, ctx.preserved);
         if (el.innerHTML !== newHtml) {
             el.innerHTML = htmlPolicy.createHTML(newHtml);
         }
