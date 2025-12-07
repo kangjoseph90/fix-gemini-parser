@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Gemini Parser
 // @namespace    http://tampermonkey.net/
-// @version      3.3
+// @version      4.0
 // @description  Gemini에서 깨지는 수식($...$)과 마크다운을 고쳐줍니다.
 // @author       kangjoseph90
 // @match        https://gemini.google.com/*
@@ -27,6 +27,20 @@
         code: true
     };
 
+    // ==================================
+    // 🎨 색상/스타일 설정
+    // ==================================
+    // 각 항목은 null이거나 다음 형식의 객체:
+    // { color: '#ff0000', opacity: 100, customCss: 'font-weight: bold' }
+    const COLOR_SETTINGS = {
+        boldColor: null,
+        italicColor: null,
+        strikeColor: null,
+        underlineColor: null,
+        codeColor: null,
+        mathColor: null
+    };
+
     if (!SETTINGS.enabled) return;
 
     // ==================================
@@ -45,13 +59,77 @@
             htmlPolicy = window.trustedTypes.createPolicy('gemini-parser', {
                 createHTML: (s) => s
             });
-        } catch (e) {}
+        } catch (e) { console.warn(e); }
+    }
+
+    // 플레이스홀더 패턴 (충돌 방지용 null 문자 사용)
+    const PH = {
+        PREFIX: '\x00\x01GP_',
+        SUFFIX: '_\x01\x00',
+        CODE: (i) => `\x00\x01GP_CODE_${i}_\x01\x00`,
+        MATH: (i) => `\x00\x01GP_MATH_${i}_\x01\x00`,
+        ELEM: (i) => `\x00\x01GP_ELEM_${i}_\x01\x00`,
+        REGEX: {
+            CODE: /\x00\x01GP_CODE_(\d+)_\x01\x00/g,
+            MATH: /\x00\x01GP_MATH_(\d+)_\x01\x00/g,
+            ELEM: /\x00\x01GP_ELEM_(\d+)_\x01\x00/g
+        }
+    };
+
+    // ==================================
+    // 커스텀 스타일 주입
+    // ==================================
+    function injectCustomStyles() {
+        let css = '';
+
+        // 헬퍼 함수: 각 스타일 항목 CSS 생성
+        function buildStyleRule(selector, colorData) {
+            if (!colorData) return '';
+            
+            let rule = `${selector} { `;
+            
+            // 기본 색상과 투명도
+            if (colorData.color) {
+                rule += `color: ${colorData.color} !important; `;
+            }
+            if (colorData.opacity !== undefined && colorData.opacity !== 100) {
+                rule += `opacity: ${colorData.opacity / 100} !important; `;
+            }
+            
+            // 커스텀 CSS 추가
+            if (colorData.customCss) {
+                // 각 속성에 !important 추가 (없는 경우)
+                const customRules = colorData.customCss
+                    .split(';')
+                    .map(r => r.trim())
+                    .filter(r => r)
+                    .map(r => r.includes('!important') ? r : r + ' !important')
+                    .join('; ');
+                if (customRules) {
+                    rule += customRules + '; ';
+                }
+            }
+            
+            rule += '}\n';
+            return rule;
+        }
+
+        css += buildStyleRule('.gemini-parser-bold', COLOR_SETTINGS.boldColor);
+        css += buildStyleRule('.gemini-parser-italic', COLOR_SETTINGS.italicColor);
+        css += buildStyleRule('.gemini-parser-strike', COLOR_SETTINGS.strikeColor);
+        css += buildStyleRule('.gemini-parser-underline', COLOR_SETTINGS.underlineColor);
+        css += buildStyleRule('.gemini-parser-code', COLOR_SETTINGS.codeColor);
+        css += buildStyleRule('.gemini-parser-math', COLOR_SETTINGS.mathColor);
+
+        if (css) {
+            GM_addStyle(css);
+        }
     }
 
     // ==================================
     // DOM → Markdown 변환
     // ==================================
-    function serialize(node) {
+    function serialize(node, ctx = { preserved: [] }) {
         if (node.nodeType === Node.TEXT_NODE) {
             return node.nodeValue;
         }
@@ -60,8 +138,16 @@
             return '';
         }
 
+        // 보존해야 할 요소 (화이트리스트)
+        if (node.tagName === 'RESPONSE-ELEMENT' ||
+            node.classList.contains('attachment-container')
+        ) {
+            const index = ctx.preserved.push(node.outerHTML) - 1;
+            return PH.ELEM(index);
+        }
+
         const tag = node.tagName;
-        const children = Array.from(node.childNodes).map(serialize).join('');
+        const children = Array.from(node.childNodes).map(c => serialize(c, ctx)).join('');
 
         switch (tag) {
             case 'I':
@@ -91,7 +177,7 @@
     // ==================================
     // Markdown → HTML 변환
     // ==================================
-    function render(text) {
+    function render(text, preserved = []) {
         // HTML 이스케이프
         let html = text
             .replace(/&/g, '&amp;')
@@ -102,8 +188,8 @@
         const codes = [];
         if (SETTINGS.code) {
             html = html.replace(/(`+)(.*?)\1/g, (_, tick, content) => {
-                codes.push(`<code>${content}</code>`);
-                return `__CODE_${codes.length - 1}__`;
+                codes.push(`<code class="gemini-parser-code">${content}</code>`);
+                return PH.CODE(codes.length - 1);
             });
         }
 
@@ -122,7 +208,7 @@
                         displayMode: false
                     });
                     maths.push(`<span class="math-inline gemini-parser-math" data-math="${clean}">${rendered}</span>`);
-                    return `__MATH_${maths.length - 1}__`;
+                    return PH.MATH(maths.length - 1);
                 } catch {
                     return match;
                 }
@@ -130,24 +216,27 @@
         }
 
         // 3. 마크다운 서식
-        if (SETTINGS.bold) html = html.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
-        if (SETTINGS.italic) html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<i>$1</i>');
-        if (SETTINGS.strike) html = html.replace(/~~(.*?)~~/g, '<s>$1</s>');
-        if (SETTINGS.underline) html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u>$1</u>');
+        if (SETTINGS.bold) html = html.replace(/\*\*(.*?)\*\*/g, '<b class="gemini-parser-bold">$1</b>');
+        if (SETTINGS.italic) html = html.replace(/(?<!\*)\*(?!\*)(.*?)\*/g, '<i class="gemini-parser-italic">$1</i>');
+        if (SETTINGS.strike) html = html.replace(/~~(.*?)~~/g, '<s class="gemini-parser-strike">$1</s>');
+        if (SETTINGS.underline) html = html.replace(/&lt;u&gt;(.*?)&lt;\/u&gt;/g, '<u class="gemini-parser-underline">$1</u>');
 
         // 4. 코드 복구
         if (SETTINGS.code) {
-            html = html.replace(/__CODE_(\d+)__/g, (_, i) => codes[i]);
+            html = html.replace(PH.REGEX.CODE, (_, i) => codes[i]);
         }
 
         // 5. 줄바꿈
         html = html.replace(/\n/g, '<br>');
-        
+
         // 6. 수식 복구
         if (SETTINGS.latex) {
-            html = html.replace(/__MATH_(\d+)__/g, (_, i) => maths[i]);
+            html = html.replace(PH.REGEX.MATH, (_, i) => maths[i]);
         }
-    
+
+        // 7. 보존된 요소 복구
+        html = html.replace(PH.REGEX.ELEM, (_, i) => preserved[i]);
+
         return html;
     }
 
@@ -165,21 +254,24 @@
     const SELECTOR = 'p:not([data-rendered]), h1:not([data-rendered]), h2:not([data-rendered]), h3:not([data-rendered]), h4:not([data-rendered]), td:not([data-rendered]), th:not([data-rendered])';
 
     function reRender() {
+        if (!SETTINGS.enabled) return;
+
         const container = document.querySelector('.chat-container');
         if (!container) return;
 
         // 스트리밍 중이면 건너뛰기
-        if (container.querySelector('.pending, .animating')) return;
+        if (container.querySelector('.response-footer.animated')) return;
 
         container.querySelectorAll(SELECTOR).forEach(el => {
-            const markdown = serialize(el);
+            const ctx = { preserved: [] };
+            const markdown = serialize(el, ctx);
 
             if (!needsProcessing(markdown)) {
                 el.setAttribute('data-rendered', '');
                 return;
             }
 
-            const newHtml = render(markdown);
+            const newHtml = render(markdown, ctx.preserved);
             if (el.innerHTML !== newHtml) {
                 el.innerHTML = htmlPolicy.createHTML(newHtml);
             }
@@ -190,12 +282,16 @@
     // ==================================
     // 초기화
     // ==================================
+    // 커스텀 스타일 주입
+    injectCustomStyles();
+
+    // DOM 변경 감지
     new MutationObserver(() => reRender()).observe(document.body, {
         childList: true,
         subtree: true
     });
 
     reRender();
-    console.log('[Gemini Parser] 시작됨');
+    console.log('[Gemini Parser] Started');
 
 })();
