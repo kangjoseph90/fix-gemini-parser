@@ -249,6 +249,19 @@
     }
 
     // ==================================
+    // 면책 조항 제거
+    // ==================================
+    function removeDisclaimers() {
+        // hallucination-disclaimer 요소를 높이 16px 빈 공간으로 변경
+        document.querySelectorAll('hallucination-disclaimer').forEach(el => {
+            el.style.height = '16px';
+            el.style.display = 'block';
+            el.style.visibility = 'hidden';
+            el.innerHTML = '';
+        });
+    }
+
+    // ==================================
     // 메인 렌더링
     // ==================================
     const SELECTOR = 'p:not([data-rendered]), h1:not([data-rendered]), h2:not([data-rendered]), h3:not([data-rendered]), h4:not([data-rendered]), td:not([data-rendered]), th:not([data-rendered])';
@@ -285,8 +298,14 @@
     // 커스텀 스타일 주입
     injectCustomStyles();
 
+    // 면책 조항 제거
+    removeDisclaimers();
+
     // DOM 변경 감지
-    new MutationObserver(() => reRender()).observe(document.body, {
+    new MutationObserver(() => {
+        reRender();
+        removeDisclaimers();
+    }).observe(document.body, {
         childList: true,
         subtree: true
     });
