@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Fix Gemini Parser",
-  "version": "5.0.1",
+  "version": "5.0.2",
   "description": "Enhance your Google Gemini experience with proper markdown and LaTeX rendering.",
   "permissions": ["storage"],
   "icons": {

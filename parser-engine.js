@@ -10,11 +10,22 @@
     const EXCLUDED = 'pre,code,[contenteditable="true"],[contenteditable=""],user-query,.user-query,.query-text,[data-role="user"],.response-footer';
     const INLINE_STYLE = ['color', 'background-color', 'font-family', 'font-size', 'font-weight', 'font-style',
         'line-height', 'letter-spacing', 'text-decoration', 'white-space', 'vertical-align'];
+    const CODE_BOX_STYLE = ['display', 'padding', 'margin', 'border', 'border-radius'];
     const BASE_CSS = `
         .gp-original { position: absolute; width: 0; height: 0; overflow: hidden;
             opacity: 0; pointer-events: none; user-select: none; }
         .gp-view { white-space: inherit; }
-        .gemini-parser-code { font-family: monospace; white-space: pre-wrap; }
+        /* Page selectors cannot reach the shadow tree. Use inherited Gemini
+           theme tokens so raw backticks and finalized CODE share a visible chip. */
+        .gemini-parser-code {
+            font-family: "Google Sans Code", monospace; font-size: 15px;
+            font-weight: 400; line-height: 14px; white-space: pre-wrap;
+            display: inline-block; padding: 4px 6px; margin: 0;
+            border: 0; border-radius: 9999px;
+            color: var(--lumi-sys-color--on-surface-variant, var(--gem-sys-color--on-surface-variant, inherit));
+            background-color: var(--lumi-sys-color--code-background,
+                var(--gem-sys-color--surface-container, color-mix(in srgb, currentColor 12%, transparent)));
+        }
         .gemini-parser-math .katex { font-size: 1.1em; }
     `;
 
@@ -236,6 +247,7 @@
                 if (!finalizedFormat) {
                     const computed = global.getComputedStyle(child);
                     INLINE_STYLE.forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
+                    if (child.tagName === 'CODE') CODE_BOX_STYLE.forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
                 }
                 // Completed Gemini tokens use our streaming presentation too;
                 // adopting native computed fonts here causes a visible final jump.
