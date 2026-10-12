@@ -280,8 +280,92 @@ test('native formatting and opaque native inline code survive independent featur
     await rendered(page, 'native fixed **literal**');
     assert.equal(await page.evaluate(() => getComputedStyle(view().querySelector('strong')).color), 'rgb(100, 0, 0)');
     await page.evaluate(() => engine.updateSettings({ bold: false }));
-    await page.waitForFunction(() => !view());
+    await rendered(page, 'native **fixed** **literal**');
+    assert.equal(await page.evaluate(() => view().querySelector('strong').textContent), 'native');
     assert.equal(await page.evaluate(() => source.innerHTML), '<strong>native</strong> **fixed** <code>**literal**</code>');
+});
+
+test('completion class and identical snapshots retain displayed nodes', async t => {
+    const page = await fixture(t, { text: '**steady** $x^2$' });
+    await page.evaluate(() => {
+        window.displayedBold = view().querySelector('b'); window.displayedMath = view().querySelector('.gemini-parser-math');
+        document.querySelector('#response').classList.add('complete');
+        document.querySelector('footer').classList.remove('animated');
+        source.setAttribute('data-path-to-node', '0');
+    });
+    await page.waitForTimeout(70);
+    assert.deepEqual(await page.evaluate(() => [view().querySelector('b') === displayedBold,
+        view().querySelector('.gemini-parser-math') === displayedMath]), [true, true]);
+});
+
+test('native final formatting and math metadata keep the existing projection and math tree before paint', async t => {
+    const page = await fixture(t, { text: '**steady** and $x^2$' });
+    assert.deepEqual(await page.evaluate(async () => {
+        const oldView = view(); const oldBold = oldView.querySelector('b'); const oldMath = oldView.querySelector('.gemini-parser-math');
+        const bold = document.createElement('b'); bold.textContent = 'steady';
+        bold.setAttribute('data-path-to-node', '0,0'); bold.setAttribute('data-index-in-node', '0');
+        const math = document.createElement('span'); math.className = 'math-inline';
+        math.setAttribute('data-math', 'x^2'); math.setAttribute('data-index-in-node', '2');
+        katex.render('x^2', math, { output: 'html' });
+        source.replaceChildren(bold, document.createTextNode(' and '), math);
+        await new Promise(requestAnimationFrame);
+        return [view() === oldView, view().querySelector('b') === oldBold,
+            view().querySelector('.gemini-parser-math') === oldMath, source.firstChild === bold,
+            view().querySelectorAll('.gemini-parser-math').length];
+    }), [true, true, true, true, 1]);
+});
+
+test('replacement paragraph gets its projection before the first animation frame', async t => {
+    const page = await fixture(t);
+    assert.equal(await page.evaluate(async () => {
+        const replacement = document.createElement('p'); replacement.id = 'answer'; replacement.textContent = '**finished**';
+        source.replaceWith(replacement); source = replacement;
+        await new Promise(requestAnimationFrame);
+        return view()?.querySelector('b')?.textContent;
+    }), 'finished');
+});
+
+test('completed metadata tokens retain streaming fonts, styles, and inline node identity', async t => {
+    const page = await fixture(t, { text: '**steady** `code`' });
+    assert.deepEqual(await page.evaluate(async () => {
+        const style = document.createElement('style'); style.textContent = 'b{font-weight:500}code{font:30px serif;color:red}';
+        document.head.appendChild(style);
+        const bold = view().querySelector('b'); const code = view().querySelector('code');
+        const before = [getComputedStyle(bold).fontWeight, getComputedStyle(code).fontFamily, getComputedStyle(code).fontSize];
+        const nativeBold = document.createElement('b'); nativeBold.textContent = 'steady'; nativeBold.setAttribute('data-path-to-node', '0,0');
+        const nativeCode = document.createElement('code'); nativeCode.textContent = 'code'; nativeCode.setAttribute('data-path-to-node', '0,2');
+        source.replaceChildren(nativeBold, document.createTextNode(' '), nativeCode);
+        await new Promise(requestAnimationFrame);
+        const after = [getComputedStyle(view().querySelector('b')).fontWeight,
+            getComputedStyle(view().querySelector('code')).fontFamily, getComputedStyle(view().querySelector('code')).fontSize];
+        return [JSON.stringify(before) === JSON.stringify(after), view().querySelector('b') === bold, view().querySelector('code') === code];
+    }), [true, true, true]);
+});
+
+test('appended streaming text retains the equal formula prefix and its text node', async t => {
+    const page = await fixture(t, { text: '$x^2$ tail' });
+    await page.evaluate(() => {
+        window.oldFormula = view().querySelector('.gemini-parser-math');
+        window.oldTail = view().lastChild;
+        originalText.data = '$x^2$ tail grows';
+    });
+    await page.waitForFunction(() => view().lastChild.textContent === ' tail grows');
+    assert.deepEqual(await page.evaluate(() => [view().querySelector('.gemini-parser-math') === oldFormula,
+        view().lastChild === oldTail, source.firstChild === originalText]), [true, true, true]);
+});
+
+test('new interactive content is shown natively before the next animation frame', async t => {
+    const page = await fixture(t);
+    assert.equal(await page.evaluate(async () => {
+        const button = document.createElement('button'); button.textContent = 'source'; source.append(button);
+        await new Promise(requestAnimationFrame);
+        return !view() && button.getBoundingClientRect().height > 0;
+    }), true);
+});
+
+test('native formulas with interactive descendants stay native', async t => {
+    const page = await fixture(t, { html: '<span class="math-inline" data-math="x"><a href="#citation">source</a></span>' });
+    assert.equal(await page.evaluate(() => source.shadowRoot), null);
 });
 
 test('unfinished math stays literal; inline and display math render when complete, with MathML accessibility', async t => {

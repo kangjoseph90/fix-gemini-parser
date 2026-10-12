@@ -1,7 +1,7 @@
 # Fix Gemini Parser
 
 Chrome extension and Tampermonkey userscript for correcting inline Markdown and
-LaTeX while Gemini streams a response. Version 5 uses the same rendering engine
+LaTeX while Gemini streams a response. Version 5.0.1 uses the same rendering engine
 for both distributions.
 
 ## Install
@@ -41,7 +41,12 @@ made while off. Finished and streaming responses use the same renderer.
 Text/child/attribute mutations enqueue affected blocks. A fixed 40 ms window
 coalesces updates without waiting for the entire stream to finish. Whole
 container replacement triggers rediscovery and cleanup. Identical snapshots are
-not rewritten. Formatting-setting changes invalidate snapshots, and stylesheets
+not rewritten. Reconciliation retains equal text/formula nodes instead of replacing
+the whole preview. New hosts and structural finalization are processed in the
+MutationObserver microtask before the next paint; plain token updates keep the
+40 ms coalescing window. Gemini's finished inline tokens keep the streaming fonts
+and formatting, and known path/index metadata does not trigger a native fallback.
+Formatting-setting changes invalidate snapshots, and stylesheets
 are shared across projections. Disclaimers are hidden with removable CSS rather
 than deleted.
 
@@ -59,10 +64,14 @@ The engine operates on `p` and `h1`–`h6` in `.chat-container`, excluding known
 query/editor/footer/code regions. Simple native inline formatting is retained.
 Adjacent text nodes and attribute-free spans can form one Markdown token.
 
-Blocks containing attachments, links, citations, native math, buttons, unknown
+Blocks containing attachments, links, citations, unrecognized native math, buttons, unknown
 components, or interactive/unknown inline attributes remain entirely native.
 If those arrive during streaming, an existing preview immediately falls back to
-the original slot on the next rendering batch. Another component's shadow root
+the original slot on the next rendering batch. Recognized inert `span.math-inline`
+elements with `data-math` are read as expressions and rendered by our own KaTeX,
+including after Gemini finalizes the source. Their descendants are never cloned;
+formulas containing interactive descendants still fall back to native display.
+Another component's shadow root
 is never taken over. Bare `td`/`th` text stays native because those tags cannot
 host shadow roots; supported paragraphs/headings inside cells can be rendered.
 Markdown delimiters crossing styled native elements are processed per text run,

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Gemini Parser
 // @namespace    http://tampermonkey.net/
-// @version      5.0.0
+// @version      5.0.1
 // @description  Gemini의 스트리밍 마크다운과 수식을 원본 DOM을 유지하며 렌더링합니다.
 // @author       kangjoseph90
 // @match        https://gemini.google.com/*
@@ -62,6 +62,54 @@
             if (index) parent.appendChild(document.createElement('br'));
             if (line) parent.appendChild(document.createTextNode(line));
         });
+    }
+
+    function nativeMath(element) {
+        return element.tagName === 'SPAN' && element.classList.contains('math-inline') && element.hasAttribute('data-math');
+    }
+
+    function mathView(expression, displayMode, document, katex) {
+        const math = document.createElement('span'); math.className = 'math-inline gemini-parser-math';
+        math.setAttribute('data-math', expression);
+        // The DOM renderer preserves MathML and never needs an HTML policy.
+        katex.render(expression, math, { throwOnError: true, output: 'htmlAndMathml', displayMode,
+            trust: false, maxExpand: 1000, maxSize: 20 });
+        return math;
+    }
+
+    // Only extension-owned nodes are patched. Keeping an equal prefix (especially
+    // KaTeX trees) avoids repainting/recreating completed content on every token.
+    function reconcile(parent, incoming) {
+        let changed = false;
+        const desired = Array.from(incoming.childNodes);
+        desired.forEach((next, index) => {
+            const current = parent.childNodes[index];
+            if (!current) { parent.appendChild(next); changed = true; return; }
+            if (current.isEqualNode(next)) return;
+            if (current.nodeType !== next.nodeType || (current.nodeType === 1 &&
+                (current.tagName !== next.tagName || current.namespaceURI !== next.namespaceURI))) {
+                current.replaceWith(next); changed = true; return;
+            }
+            if (current.nodeType === 3) {
+                // Changing just the tail retains selection offsets in the prefix.
+                let prefix = 0;
+                while (prefix < current.length && prefix < next.length && current.data[prefix] === next.data[prefix]) prefix++;
+                current.replaceData(prefix, current.length - prefix, next.data.slice(prefix));
+                changed = true;
+            } else if (current.nodeType === 1) {
+                for (const attribute of Array.from(current.attributes)) {
+                    if (!next.hasAttribute(attribute.name)) { current.removeAttribute(attribute.name); changed = true; }
+                }
+                for (const attribute of next.attributes) {
+                    if (current.getAttribute(attribute.name) !== attribute.value) {
+                        current.setAttribute(attribute.name, attribute.value); changed = true;
+                    }
+                }
+                changed = reconcile(current, next) || changed;
+            } else { current.replaceWith(next); changed = true; }
+        });
+        while (parent.childNodes.length > desired.length) { parent.lastChild.remove(); changed = true; }
+        return changed;
     }
 
     // Use markdown-it's delimiter balancing for nested emphasis. Only inline
@@ -136,12 +184,8 @@
                 stack.at(-1).appendChild(code); plain += token.content; transformed = true;
             } else if (token.type === 'gp_math') {
                 if (!options.latex || !katex || !token.content) { literal(token.meta.raw); continue; }
-                const math = document.createElement('span'); math.className = 'math-inline gemini-parser-math';
-                math.setAttribute('data-math', token.content);
                 try {
-                    // KaTeX's DOM renderer avoids innerHTML/Trusted Types sinks.
-                    katex.render(token.content, math, { throwOnError: true, output: 'htmlAndMathml', displayMode: token.markup === '$$',
-                        trust: false, maxExpand: 1000, maxSize: 20 });
+                    const math = mathView(token.content, token.markup === '$$', document, katex);
                     stack.at(-1).appendChild(math); transformed = true;
                 } catch { literal(token.meta.raw); }
             } else if (token.type === 'gp_underline') {
@@ -157,12 +201,17 @@
     function safeBlock(element) {
         if (!element.isConnected || !element.closest('.chat-container') || element.closest(EXCLUDED) || element.isContentEditable) return false;
         if (element.querySelector(BLOCKS)) return false;
-        for (const child of element.querySelectorAll('*')) {
+        function safeInline(child) {
             if (!INLINE_TAGS.has(child.tagName) || child.shadowRoot || child.isContentEditable) return false;
+            if ([...child.attributes].some(attribute => !['class', 'style', 'dir', 'lang', 'data-path-to-node', 'data-index-in-node'].includes(attribute.name) &&
+                !attribute.name.startsWith('_ngcontent-') && !(nativeMath(child) && attribute.name === 'data-math'))) return false;
+            // Gemini's finished formula is an atomic text presentation. Read its
+            // expression, never clone its descendants or any interactive widget.
+            if (nativeMath(child)) return !child.querySelector('a,button,input,textarea,select,[tabindex],[contenteditable],[role]');
             if (/katex|mathjax|citation|attachment|source-chip/i.test(child.className)) return false;
-            if ([...child.attributes].some(attribute => !['class', 'style', 'dir', 'lang'].includes(attribute.name))) return false;
+            return Array.from(child.children).every(safeInline);
         }
-        return true;
+        return Array.from(element.children).every(safeInline);
     }
 
     function renderBlock(source, settings, colors, document, katex, markdown) {
@@ -178,19 +227,33 @@
             function visit(child) {
                 if (child.nodeType === 3) { text += child.nodeValue; return; }
                 if (child.nodeType !== 1) return;
+                if (nativeMath(child)) {
+                    flush();
+                    // Native formulas stay formatted even with the repair toggle
+                    // off, just as native <b>/<code> formatting does.
+                    fragment.appendChild(mathView(child.getAttribute('data-math'), !!child.querySelector('.katex-display'), document, katex));
+                    changed = true; return;
+                }
                 // Gemini can split one token across adjacent Text nodes/spans.
                 if (child.tagName === 'SPAN' && child.attributes.length === 0) {
                     child.childNodes.forEach(visit); return;
                 }
                 flush();
-                const copy = document.createElement(child.tagName.toLowerCase());
-                const computed = global.getComputedStyle(child);
-                INLINE_STYLE.forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
-                ['dir', 'lang'].forEach(name => { if (child.hasAttribute(name)) copy.setAttribute(name, child.getAttribute(name)); });
                 const type = FORMATS[child.tagName];
+                const finalizedFormat = type && settings[type] &&
+                    (child.hasAttribute('data-path-to-node') || child.hasAttribute('data-index-in-node'));
+                const tag = finalizedFormat ? { bold: 'b', italic: 'i', strike: 's', underline: 'u', code: 'code' }[type] : child.tagName.toLowerCase();
+                const copy = document.createElement(tag);
+                if (!finalizedFormat) {
+                    const computed = global.getComputedStyle(child);
+                    INLINE_STYLE.forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
+                }
+                // Completed Gemini tokens use our streaming presentation too;
+                // adopting native computed fonts here causes a visible final jump.
+                ['dir', 'lang'].forEach(name => { if (child.hasAttribute(name)) copy.setAttribute(name, child.getAttribute(name)); });
                 if (type && settings[type]) {
                     copy.classList.add(`gemini-parser-${type}`);
-                    changed ||= !!colors[`${type}Color`];
+                    changed = true;
                 }
                 if (child.tagName === 'CODE') copy.textContent = child.textContent;
                 else copy.appendChild(childrenOf(child));
@@ -296,7 +359,7 @@
                 if (!entry) return;
                 const css = styles();
                 if (entry.style && entry.style.textContent !== css) entry.style.textContent = css;
-                entry.view.replaceChildren(parsed.fragment); counters.renderWrites++;
+                if (reconcile(entry.view, parsed.fragment)) counters.renderWrites++;
             } catch (error) {
                 restore(element);
                 console.warn('[Gemini Parser] Kept native content after rendering error:', error);
@@ -326,11 +389,26 @@
             if (timer === null) timer = global.setTimeout(flush, options.interval ?? 40);
         }
 
+        function flushNow(fullScan = false) {
+            if (timer !== null) global.clearTimeout(timer);
+            timer = null; scan ||= fullScan; flush();
+        }
+
         const observer = new global.MutationObserver(records => {
             let fullScan = false;
+            let structuralChange = false;
             for (const record of records) {
                 const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
                 const block = target?.closest(BLOCKS);
+                if (record.type === 'childList') {
+                    // A new/replaced host otherwise shows raw content until the
+                    // 40 ms token timer fires. Mount it in this microtask, before
+                    // the next paint. Plain Text updates still use coalescing.
+                    if (block && active.has(block) && [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1)) structuralChange = true;
+                    if (Array.from(record.addedNodes).some(node => node.nodeType === 1 &&
+                        (node.matches(BLOCKS) || node.querySelector(BLOCKS)) &&
+                        (target?.closest('.chat-container') || node.matches('.chat-container') || node.querySelector('.chat-container')))) structuralChange = true;
+                }
                 if (block && (block.closest('.chat-container') || active.has(block))) {
                     dirty.add(block);
                     if (record.type === 'attributes') snapshots.delete(block);
@@ -342,7 +420,10 @@
                     revision++; fullScan = true;
                 }
             }
-            if (fullScan || dirty.size) schedule(fullScan);
+            if (fullScan || dirty.size) {
+                if (structuralChange) flushNow(fullScan);
+                else schedule(fullScan);
+            }
         });
 
         function start() {
