@@ -9,7 +9,7 @@
     const FORMATS = { B: 'bold', STRONG: 'bold', I: 'italic', EM: 'italic', S: 'strike', DEL: 'strike', U: 'underline', CODE: 'code' };
     const EXCLUDED = 'pre,code,[contenteditable="true"],[contenteditable=""],user-query,.user-query,.query-text,[data-role="user"],.response-footer';
     const INLINE_STYLE = ['color', 'background-color', 'font-family', 'font-size', 'font-weight', 'font-style',
-        'line-height', 'letter-spacing', 'text-decoration', 'white-space', 'vertical-align'];
+        'line-height', 'letter-spacing', 'text-decoration', 'white-space', 'vertical-align', 'display', 'visibility', 'opacity'];
     const CODE_BOX_STYLE = ['display', 'padding', 'margin', 'border', 'border-radius'];
     const BASE_CSS = `
         .gp-original { position: absolute; width: 0; height: 0; overflow: hidden;
@@ -41,9 +41,11 @@
         return count % 2 === 1;
     }
 
-    function closing(text, from, delimiter) {
+    function closing(text, from, delimiter, literal = false) {
         for (let i = from; i <= text.length - delimiter.length; i++) {
-            if (escaped(text, i) || !text.startsWith(delimiter, i)) continue;
+            // Backslashes inside code spans are ordinary content, including
+            // immediately before closing backticks. Math still honors escapes.
+            if ((!literal && escaped(text, i)) || !text.startsWith(delimiter, i)) continue;
             const character = delimiter[0];
             if ('*`$~'.includes(character) && (text[i - 1] === character || runLength(text, i, character) !== delimiter.length)) continue;
             return i;
@@ -56,6 +58,31 @@
             if (index) parent.appendChild(document.createElement('br'));
             if (line) parent.appendChild(document.createTextNode(line));
         });
+    }
+
+    function underlineClosing(text, from) {
+        let depth = 1;
+        for (let i = from; i < text.length;) {
+            if (escaped(text, i)) { i++; continue; }
+            let delimiter = '';
+            let endDelimiter = '';
+            if (text[i] === '`') delimiter = endDelimiter = '`'.repeat(runLength(text, i, '`'));
+            else if (text[i] === '$' && runLength(text, i, '$') <= 2) delimiter = endDelimiter = '$'.repeat(runLength(text, i, '$'));
+            else if (text.startsWith('\\(', i) || text.startsWith('\\[', i)) {
+                delimiter = text.slice(i, i + 2); endDelimiter = delimiter === '\\(' ? '\\)' : '\\]';
+            }
+            if (delimiter) {
+                const end = closing(text, i + delimiter.length, endDelimiter, text[i] === '`');
+                if (end >= 0) { i = end + endDelimiter.length; continue; }
+                if (text[i] === '`') return -1;
+            }
+            if (text.startsWith('<u>', i)) { depth++; i += 3; }
+            else if (text.startsWith('</u>', i)) {
+                if (--depth === 0) return i;
+                i += 4;
+            } else i++;
+        }
+        return -1;
     }
 
     function nativeMath(element) {
@@ -109,7 +136,9 @@
     // Use markdown-it's delimiter balancing for nested emphasis. Only inline
     // formatting is enabled; links, images and raw HTML are never generated.
     function tokenizer(markdownit) {
-        const markdown = markdownit({ html: false, linkify: false }).disable(['link', 'image', 'autolink']);
+        // The input is already DOM text; decoding entities again changes literal
+        // examples such as &copy; that Gemini has already escaped for display.
+        const markdown = markdownit({ html: false, linkify: false }).disable(['link', 'image', 'autolink', 'entity']);
         markdown.inline.ruler.at('text', (state, silent) => {
             let end = state.pos;
             while (end < state.posMax && !/[\n\\`*_[\]!<&~$]/.test(state.src[end])) end++;
@@ -119,10 +148,15 @@
         });
         function opaque(state, type, delimiter, endDelimiter = delimiter) {
             const start = state.pos;
-            const end = closing(state.src, start + delimiter.length, endDelimiter);
+            const end = type === 'gp_underline' ? underlineClosing(state.src, start + delimiter.length)
+                : closing(state.src, start + delimiter.length, endDelimiter, type === 'code_inline');
             const token = state.push(end < 0 ? 'text' : type, '', 0);
             const finish = end < 0 ? state.posMax : end + endDelimiter.length;
             token.content = end < 0 ? state.src.slice(start) : state.src.slice(start + delimiter.length, end);
+            if (end >= 0 && type === 'code_inline') {
+                token.content = token.content.replace(/\r\n?|\n/g, ' ');
+                if (/^ .+ $/.test(token.content) && /[^ ]/.test(token.content)) token.content = token.content.slice(1, -1);
+            }
             token.markup = delimiter;
             token.meta = { raw: state.src.slice(start, finish), endDelimiter };
             state.pos = finish;
@@ -134,15 +168,50 @@
             return opaque(state, 'code_inline', '`'.repeat(runLength(state.src, state.pos, '`')));
         });
         markdown.inline.ruler.before('escape', 'gp_math', (state, silent) => {
+            if (state.src.startsWith('\\(', state.pos) || state.src.startsWith('\\[', state.pos)) {
+                if (silent) return false;
+                const delimiter = state.src.slice(state.pos, state.pos + 2);
+                return opaque(state, 'gp_math', delimiter, delimiter === '\\(' ? '\\)' : '\\]');
+            }
             if (state.src[state.pos] !== '$') return false;
             const length = runLength(state.src, state.pos, '$');
             if (silent) return false;
             if (length > 2) {
                 state.pending += '$'.repeat(length); state.pos += length; return true;
             }
+            if (length === 1) {
+                if (/\s/.test(state.src[state.pos + 1] || '')) return false;
+                const end = closing(state.src, state.pos + 1, '$');
+                // Price text must not be paired with the next price's dollar.
+                // Do not search beyond an invalid close into a later formula.
+                if (end >= 0 && (/\s/.test(state.src[end - 1]) || /\d/.test(state.src[end + 1] || ''))) return false;
+                if (end < 0 && /^\d+(?:[.,]\d+)*(?=\s|[\uac00-\ud7af;,:.!?)]|$)/.test(state.src.slice(state.pos + 1)) &&
+                    !/[\\^_=+{}]/.test(state.src.slice(state.pos + 1))) return false;
+            }
             if (!state.env.settings.latex && closing(state.src, state.pos + length, '$'.repeat(length)) < 0) return false;
             return opaque(state, 'gp_math', '$'.repeat(length));
         });
+        // Keep markdown-it's delimiter pairing and nesting, but accept a closing
+        // * or ~~ before Korean suffixes even when the content ends in quotes or
+        // punctuation. Underscores in identifiers retain the native word rules.
+        function koreanClose(state, silent, strike) {
+            const marker = strike ? 126 : 42;
+            if (silent || state.src.charCodeAt(state.pos) !== marker) return false;
+            const scanned = state.scanDelims(state.pos, true);
+            if (scanned.can_close || (strike && scanned.length < 2) ||
+                !/[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/.test(state.src[state.pos + scanned.length] || '') ||
+                !state.pos || /\s/.test(state.src[state.pos - 1])) return false;
+            let remaining = scanned.length;
+            if (strike && remaining % 2) { state.push('text', '', 0).content = '~'; remaining--; }
+            for (let i = 0; i < remaining; i += strike ? 2 : 1) {
+                state.push('text', '', 0).content = strike ? '~~' : '*';
+                state.delimiters.push({ marker, length: strike ? 0 : scanned.length,
+                    token: state.tokens.length - 1, end: -1, open: scanned.can_open, close: true });
+            }
+            state.pos += scanned.length; return true;
+        }
+        markdown.inline.ruler.before('emphasis', 'gp_korean_emphasis', (state, silent) => koreanClose(state, silent, false));
+        markdown.inline.ruler.before('strikethrough', 'gp_korean_strike', (state, silent) => koreanClose(state, silent, true));
         markdown.inline.ruler.before('escape', 'gp_underline', (state, silent) => {
             if (!state.src.startsWith('<u>', state.pos) || silent || !state.env.settings.underline) return false;
             return opaque(state, 'gp_underline', '<u>', '</u>');
@@ -179,7 +248,7 @@
             } else if (token.type === 'gp_math') {
                 if (!options.latex || !katex || !token.content) { literal(token.meta.raw); continue; }
                 try {
-                    const math = mathView(token.content, token.markup === '$$', document, katex);
+                    const math = mathView(token.content, token.markup === '$$' || token.markup === '\\[', document, katex);
                     stack.at(-1).appendChild(math); transformed = true;
                 } catch { literal(token.meta.raw); }
             } else if (token.type === 'gp_underline') {
@@ -226,7 +295,13 @@
                     // Native formulas stay formatted even with the repair toggle
                     // off, just as native <b>/<code> formatting does.
                     try {
-                        fragment.appendChild(mathView(child.getAttribute('data-math'), !!child.querySelector('.katex-display'), document, katex));
+                        const math = mathView(child.getAttribute('data-math'), !!child.querySelector('.katex-display'), document, katex);
+                        const computed = global.getComputedStyle(child);
+                        for (const [property, baseline] of [['display', 'inline'], ['visibility', 'visible'], ['opacity', '1']]) {
+                            const value = computed.getPropertyValue(property);
+                            if (property === 'display' ? value === 'none' : value !== baseline) math.style.setProperty(property, value);
+                        }
+                        fragment.appendChild(math);
                     } catch {
                         // A malformed final formula must not reset the rest of
                         // the paragraph or repeatedly switch display ownership.
@@ -235,12 +310,13 @@
                     changed = true; return;
                 }
                 // Gemini can split one token across adjacent Text nodes/spans.
-                if (child.tagName === 'SPAN' && child.attributes.length === 0) {
+                if (child.tagName === 'SPAN' && [...child.attributes].every(attribute =>
+                    ['data-path-to-node', 'data-index-in-node'].includes(attribute.name) || attribute.name.startsWith('_ngcontent-'))) {
                     child.childNodes.forEach(visit); return;
                 }
                 flush();
                 const type = FORMATS[child.tagName];
-                const finalizedFormat = type && settings[type] &&
+                const finalizedFormat = type && settings[type] && !child.hasAttribute('style') && !child.hasAttribute('class') &&
                     (child.hasAttribute('data-path-to-node') || child.hasAttribute('data-index-in-node'));
                 const tag = finalizedFormat ? { bold: 'b', italic: 'i', strike: 's', underline: 'u', code: 'code' }[type] : child.tagName.toLowerCase();
                 const copy = document.createElement(tag);
@@ -420,7 +496,8 @@
                 // Inline styles copied into the preview must follow ancestor
                 // theme changes too, even though the source HTML is unchanged.
                 if (record.type === 'attributes' && ['class', 'style'].includes(record.attributeName) &&
-                    [...containers].some(container => target === container || target?.contains(container))) {
+                    [...containers].some(container => target === container || target?.contains(container) ||
+                        (container.contains(target) && target.querySelector(BLOCKS)))) {
                     revision++; fullScan = true;
                 }
             }

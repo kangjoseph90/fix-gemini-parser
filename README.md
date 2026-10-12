@@ -1,7 +1,7 @@
 # Fix Gemini Parser
 
 Chrome extension and Tampermonkey userscript for correcting inline Markdown and
-LaTeX while Gemini streams a response. Version 5.0.2 uses the same rendering engine
+LaTeX while Gemini streams a response. Version 5.0.3 uses the same rendering engine
 for both distributions.
 
 ## Install
@@ -46,18 +46,28 @@ the whole preview. New hosts and structural finalization are processed in the
 MutationObserver microtask before the next paint; plain token updates keep the
 40 ms coalescing window. Gemini's finished inline tokens keep the streaming fonts
 and formatting, and known path/index metadata does not trigger a native fallback.
+Native inline visibility/opacity and explicit styles are retained. Class/style
+changes on ancestors inside the chat also refresh copied styles.
 Formatting-setting changes invalidate snapshots, and stylesheets
 are shared across projections. Disclaimers are hidden with removable CSS rather
 than deleted.
 
-Inline formatting uses markdown-it's balanced delimiters. Inline code and math
-are opaque to other formatting, including when their formatting toggle is off.
+Inline formatting uses markdown-it's balanced delimiters, with a narrow repair
+for punctuation-ended emphasis/strike immediately followed by Korean suffixes.
+Identifier underscores keep the tokenizer's normal word rules. Literal HTML
+entity spellings are preserved because the input is already DOM text. Inline
+code and math are opaque to other formatting, including when their formatting toggle is off.
 Inline code has its own background, spacing, and font inside the shadow tree,
 using inherited Gemini theme variables throughout streaming and finalization.
 Color/opacity/custom CSS overrides still apply; disabling code repair preserves
 native code box styles when other formats keep the paragraph projected.
 Unfinished code/math stays literal until closed, and unfinished emphasis follows
-the inline tokenizer's literal fallback. Valid `$...$` and `$$...$$` render with
+the inline tokenizer's literal fallback. Nested literal `<u>` pairs skip tag
+spellings inside code/math. Closed code normalizes line breaks and edge spaces before Gemini finalizes it.
+Inline dollar math rejects whitespace boundaries and closing dollars followed
+by digits to avoid pairing prices; an unmatched plain numeric price does not
+block later emphasis. Dollar notation remains ambiguous for unusual prose.
+Valid `$...$`, `$$...$$`, `\(...\)`, and `\[...\]` render with
 KaTeX's DOM renderer and MathML; invalid math stays literal. Text is built with
 DOM APIs, without raw HTML injection or a Trusted Types policy. KaTeX font faces
 are registered at document scope and its layout styles at shadow scope.
@@ -66,7 +76,8 @@ are registered at document scope and its layout styles at shadow scope.
 
 The engine operates on `p` and `h1`–`h6` in `.chat-container`, excluding known user
 query/editor/footer/code regions. Simple native inline formatting is retained.
-Adjacent text nodes and attribute-free spans can form one Markdown token.
+Adjacent text nodes and spans carrying only Gemini path/index/Angular metadata
+can form one Markdown token.
 
 Blocks containing attachments, links, citations, unrecognized native math, buttons, unknown
 components, or interactive/unknown inline attributes remain entirely native.
