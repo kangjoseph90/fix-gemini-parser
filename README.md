@@ -1,7 +1,7 @@
 # Fix Gemini Parser
 
 Chrome extension and Tampermonkey userscript for correcting inline Markdown and
-LaTeX while Gemini streams a response. Version 5.0.1 uses the same rendering engine
+LaTeX while Gemini streams a response. Version 5.0.2 uses the same rendering engine
 for both distributions.
 
 ## Install
@@ -52,6 +52,10 @@ than deleted.
 
 Inline formatting uses markdown-it's balanced delimiters. Inline code and math
 are opaque to other formatting, including when their formatting toggle is off.
+Inline code has its own background, spacing, and font inside the shadow tree,
+using inherited Gemini theme variables throughout streaming and finalization.
+Color/opacity/custom CSS overrides still apply; disabling code repair preserves
+native code box styles when other formats keep the paragraph projected.
 Unfinished code/math stays literal until closed, and unfinished emphasis follows
 the inline tokenizer's literal fallback. Valid `$...$` and `$$...$$` render with
 KaTeX's DOM renderer and MathML; invalid math stays literal. Text is built with

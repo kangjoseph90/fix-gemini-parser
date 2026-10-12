@@ -354,6 +354,63 @@ test('appended streaming text retains the equal formula prefix and its text node
         view().lastChild === oldTail, source.firstChild === originalText]), [true, true, true]);
 });
 
+test('inline code keeps its visible themed chip during streaming, completion, and toggles', async t => {
+    const page = await fixture(t, { text: 'inline `const x = "$math$ **literal**";`' });
+    assert.deepEqual(await page.evaluate(async () => {
+        source.style.setProperty('--lumi-sys-color--code-background', '#171717');
+        source.style.setProperty('--lumi-sys-color--on-surface-variant', 'rgba(255,255,255,.55)');
+        const code = view().querySelector('code');
+        const box = node => {
+            const style = getComputedStyle(node);
+            return ['backgroundColor', 'color', 'display', 'padding', 'borderRadius', 'fontFamily', 'fontSize'].map(key => style[key]);
+        };
+        const before = box(code);
+        const native = document.createElement('code'); native.textContent = code.textContent;
+        native.setAttribute('data-path-to-node', '0,1');
+        source.replaceChildren(document.createTextNode('inline '), native);
+        await new Promise(requestAnimationFrame);
+        const stable = view().querySelector('code') === code && JSON.stringify(box(code)) === JSON.stringify(before);
+        engine.updateSettings({ enabled: false });
+        const restored = source.shadowRoot.firstChild.tagName === 'SLOT' && source.lastChild === native;
+        engine.updateSettings({ enabled: true });
+        return [before, stable, restored, JSON.stringify(box(view().querySelector('code'))) === JSON.stringify(before),
+            view().querySelector('code').textContent, view().querySelectorAll('.katex,b').length];
+    }), [['rgb(23, 23, 23)', 'rgba(255, 255, 255, 0.55)', 'inline-block', '4px 6px', '9999px',
+        '"Google Sans Code", monospace', '15px'], true, true, true, 'const x = "$math$ **literal**";', 0]);
+});
+
+test('code theme changes and user overrides apply without replacing the code node', async t => {
+    const page = await fixture(t, { text: '`code`' });
+    const themes = await page.evaluate(() => {
+        const code = view().querySelector('code');
+        window.originalCode = code;
+        const background = () => getComputedStyle(code).backgroundColor;
+        const fallback = background();
+        source.style.setProperty('--lumi-sys-color--code-background', '#eeeeee');
+        const light = background();
+        source.style.setProperty('--lumi-sys-color--code-background', '#171717');
+        const dark = background();
+        engine.updateSettings({ codeColor: { color: '#ff0000', opacity: 75, customCss: 'border-radius: 4px; padding: 2px;' } });
+        return [fallback !== 'rgba(0, 0, 0, 0)', light, dark];
+    });
+    assert.deepEqual(themes, [true, 'rgb(238, 238, 238)', 'rgb(23, 23, 23)']);
+    await page.waitForFunction(() => getComputedStyle(view().querySelector('code')).color === 'rgb(255, 0, 0)');
+    assert.deepEqual(await page.evaluate(() => {
+        const code = view().querySelector('code'); const style = getComputedStyle(code);
+        return [code === originalCode, style.opacity, style.borderRadius, style.padding];
+    }), [true, '0.75', '4px', '2px']);
+});
+
+test('disabling code repair preserves the native code box inside other repaired formatting', async t => {
+    const page = await fixture(t, { html: '**bold** <code data-path-to-node="0,1" style="display:inline-block;background:#171717;padding:4px 6px;border-radius:9999px">native</code>', settings: { code: false } });
+    assert.deepEqual(await page.evaluate(() => {
+        const native = source.querySelector('code'); const code = view().querySelector('code');
+        const box = node => { const style = getComputedStyle(node); return ['backgroundColor', 'display', 'padding', 'borderRadius'].map(key => style[key]); };
+        return [JSON.stringify(box(native)) === JSON.stringify(box(code)), code.textContent,
+            code.classList.contains('gemini-parser-code'), view().querySelector('b').textContent];
+    }), [true, 'native', false, 'bold']);
+});
+
 test('new interactive content is shown natively before the next animation frame', async t => {
     const page = await fixture(t);
     assert.equal(await page.evaluate(async () => {
