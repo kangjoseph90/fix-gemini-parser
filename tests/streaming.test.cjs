@@ -368,6 +368,19 @@ test('native formulas with interactive descendants stay native', async t => {
     assert.equal(await page.evaluate(() => source.shadowRoot), null);
 });
 
+test('a malformed final native formula does not restore the entire paragraph', async t => {
+    const page = await fixture(t, { text: '**steady** and $x$' });
+    assert.deepEqual(await page.evaluate(async () => {
+        const oldView = view(); const oldBold = view().querySelector('b');
+        const bold = document.createElement('b'); bold.textContent = 'steady'; bold.setAttribute('data-path-to-node', '0');
+        const invalid = document.createElement('span'); invalid.className = 'math-inline';
+        invalid.setAttribute('data-math', 'a$$b'); invalid.textContent = 'a$$b';
+        source.replaceChildren(bold, document.createTextNode(' and '), invalid);
+        await new Promise(requestAnimationFrame);
+        return [view() === oldView, view().querySelector('b') === oldBold, view().textContent, source.lastChild === invalid];
+    }), [true, true, 'steady and a$$b', true]);
+});
+
 test('unfinished math stays literal; inline and display math render when complete, with MathML accessibility', async t => {
     const page = await fixture(t, { text: '$x^' });
     assert.equal(await page.evaluate(() => source.shadowRoot), null);
@@ -450,6 +463,14 @@ test('late stylesheet arrival while disabled cannot resurrect output, and enabli
     assert.equal(await page.evaluate(() => source.shadowRoot), null);
     await page.evaluate(() => engine.updateSettings({ enabled: true }));
     await page.waitForFunction(() => !!view()?.querySelector('.katex'));
+});
+
+test('existing native formulas stay native until the math stylesheet is ready', async t => {
+    const page = await fixture(t, { html: '<span class="math-inline" data-math="x">native formula</span>', css: false });
+    assert.equal(await page.evaluate(() => source.shadowRoot), null);
+    await page.evaluate(css => engine.setKatexCss(css), css);
+    await page.waitForFunction(() => !!view()?.querySelector('.katex'));
+    assert.equal(await page.evaluate(() => source.innerHTML === originalMarkup), true);
 });
 
 test('extension adapter listens when initially disabled and accepts cross-tab storage updates', async t => {
