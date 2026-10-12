@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Fix Gemini Parser",
-  "version": "4.1",
+  "version": "5.0.3",
   "description": "Enhance your Google Gemini experience with proper markdown and LaTeX rendering.",
   "permissions": ["storage"],
   "icons": {
@@ -18,8 +18,13 @@
   "content_scripts": [
     {
       "matches": ["https://gemini.google.com/*"],
-      "js": ["lib/katex.min.js", "content.js"],
-      "css": ["lib/katex.min.css"]
+      "js": ["lib/katex.min.js", "lib/markdown-it.min.js", "parser-engine.js", "content.js"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["lib/katex.min.css", "lib/fonts/*"],
+      "matches": ["https://gemini.google.com/*"]
     }
   ]
 }

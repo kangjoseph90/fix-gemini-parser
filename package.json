@@ -1,0 +1,11 @@
+{
+  "name": "fix-gemini-parser",
+  "version": "5.0.3",
+  "private": true,
+  "scripts": {
+    "build:userscript": "node scripts/build-userscript.cjs",
+    "check:userscript": "node scripts/build-userscript.cjs --check",
+    "test": "node --test tests/streaming.test.cjs tests/extension.test.cjs"
+  },
+  "devDependencies": { "playwright": "1.62.1" }
+}
