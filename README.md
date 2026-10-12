@@ -1,7 +1,7 @@
 # Fix Gemini Parser
 
 Chrome extension and Tampermonkey userscript for correcting inline Markdown and
-LaTeX while Gemini streams a response. Version 5.0.3 uses the same rendering engine
+LaTeX while Gemini streams a response. Version 5.0.4 uses the same rendering engine
 for both distributions.
 
 ## Install
@@ -74,7 +74,8 @@ are registered at document scope and its layout styles at shadow scope.
 
 ## Supported scope
 
-The engine operates on `p` and `h1`–`h6` in `.chat-container`, excluding known user
+The engine operates on `p`, `h1`–`h6`, and existing direct `span` children of
+`td`/`th` in `.chat-container`, excluding known user
 query/editor/footer/code regions. Simple native inline formatting is retained.
 Adjacent text nodes and spans carrying only Gemini path/index/Angular metadata
 can form one Markdown token.
@@ -87,8 +88,14 @@ elements with `data-math` are read as expressions and rendered by our own KaTeX,
 including after Gemini finalizes the source. Their descendants are never cloned;
 formulas containing interactive descendants still fall back to native display.
 Another component's shadow root
-is never taken over. Bare `td`/`th` text stays native because those tags cannot
-host shadow roots; supported paragraphs/headings inside cells can be rendered.
+is never taken over. Gemini's existing table-cell spans host the same streaming
+preview as paragraphs, including math, native bold, inline code, and color settings.
+The table/cells and their content nodes are never wrapped, moved, or replaced;
+column layout, merged cells, scrolling, and native copy data remain owned by Gemini.
+Cell hosts with interactive/unknown attributes or unsafe descendants stay native.
+Bare `td`/`th` text stays native because those tags cannot host shadow roots;
+supported paragraphs/headings inside cells can also be rendered. Delimiters are
+not joined across separate cell spans or across cells.
 Markdown delimiters crossing styled native elements are processed per text run,
 not across those element boundaries. This is an inline repair tool, not a full
 replacement for Gemini's block Markdown renderer.

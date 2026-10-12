@@ -183,7 +183,7 @@ test('interactive content added during streaming restores live original buttons 
     assert.equal(await page.evaluate(() => source.firstChild === originalText), true);
 });
 
-test('attachments, native KaTeX, code blocks, user queries, editors, table cells and outside text stay native', async t => {
+test('attachments, native KaTeX, code blocks, user queries, editors, bare table cells and outside text stay native', async t => {
     const page = await fixture(t, { html: '<response-element>**attachment**</response-element>' });
     await page.evaluate(() => {
         const container = document.querySelector('.chat-container');
@@ -191,6 +191,145 @@ test('attachments, native KaTeX, code blocks, user queries, editors, table cells
     });
     await page.waitForTimeout(70);
     assert.deepEqual(await page.evaluate(() => ['answer', 'math', 'pre', 'user', 'editor', 'cell', 'outside'].map(id => !!document.getElementById(id).shadowRoot)), Array(7).fill(false));
+});
+
+async function tableFixture(t, cells, options = {}) {
+    const page = await fixture(t, { text: 'plain', ...options });
+    await page.evaluate(cells => {
+        document.querySelector('#response').insertAdjacentHTML('afterbegin',
+            '<div class="table-content"><table><thead><tr><th scope="col"><span data-path-to-node="0,0">**수식**</span></th>' +
+            '<th scope="col"><span data-path-to-node="0,1">설명</span></th></tr></thead><tbody>' + cells + '</tbody></table></div>' +
+            '<button id="table-copy">Copy table</button>');
+        window.table = document.querySelector('table');
+        window.tableMarkup = table.outerHTML;
+        window.tableNodes = [...table.querySelectorAll('*')];
+        window.cell = table.querySelector('td > span');
+        window.cellText = cell.firstChild;
+        window.cellView = () => cell.shadowRoot?.querySelector('.gp-view');
+        document.querySelector('#table-copy').addEventListener('click', () => {
+            window.copiedTable = { text: table.innerText, html: table.outerHTML };
+        });
+    }, cells);
+    await page.waitForFunction(() => document.querySelector('th > span').shadowRoot?.querySelector('b'));
+    return page;
+}
+
+test('Gemini cell spans render the reported formulas and native bold without changing table source or copy data', async t => {
+    const page = await tableFixture(t, String.raw`<tr><td><span data-path-to-node="1,0">$\alpha + \beta = -\frac{b}{a}$를 근과 계수의 관계라 부릅니다.</span></td>
+        <td><span data-path-to-node="1,1"><b data-path-to-node="1,1" data-index-in-node="0">근과 계수</b>를 활용한 풀이입니다.</span></td></tr>
+        <tr><td><span data-path-to-node="2,0">$\sum_{k=1}^{n} k = \frac{n(n+1)}{2}$라는 공식입니다.</span></td>
+        <td><span data-path-to-node="2,1"><code data-path-to-node="2,1">$literal$ **code**</code></span></td></tr>`,
+    { settings: { boldColor: { color: '#ffcc66' } } });
+    assert.deepEqual(await page.evaluate(() => {
+        const hosts = [...table.querySelectorAll('td > span')];
+        return [hosts.slice(0, 3).filter(host => host.shadowRoot?.querySelector('.katex')).length,
+            getComputedStyle(hosts[1].shadowRoot.querySelector('b')).color,
+            hosts[3].shadowRoot.querySelector('code').textContent,
+            table.outerHTML === tableMarkup, tableNodes.every((node, i) => table.querySelectorAll('*')[i] === node),
+            cell.firstChild === cellText, table.querySelectorAll('td').length];
+    }), [2, 'rgb(255, 204, 102)', '$literal$ **code**', true, true, true, 4]);
+    await page.locator('#table-copy').click();
+    assert.deepEqual(await page.evaluate(() => [copiedTable.html === tableMarkup,
+        copiedTable.text.includes('$\\alpha + \\beta = -\\frac{b}{a}$'),
+        copiedTable.text.includes('$\\sum_{k=1}^{n} k = \\frac{n(n+1)}{2}$')]), [true, true, true]);
+    const tree = await page.locator('table').ariaSnapshot();
+    assert.match(tree, /columnheader "수식"/);
+    assert.doesNotMatch(tree, /\$\\alpha|\$\\sum|\*\*수식\*\*/);
+});
+
+test('table streaming and finalization retain source identity and stable formula nodes before paint', async t => {
+    const page = await tableFixture(t, '<tr><td><span data-path-to-node="1,0">start **open</span></td><td>native</td></tr>');
+    assert.equal(await page.evaluate(() => cell.shadowRoot), null);
+    await page.evaluate(() => { cellText.data = '**steady** and $x^2$'; });
+    await page.waitForFunction(() => cellView()?.querySelector('.katex'));
+    assert.deepEqual(await page.evaluate(async () => {
+        const oldView = cellView(), oldBold = oldView.querySelector('b'), oldMath = oldView.querySelector('.gemini-parser-math');
+        const bold = document.createElement('b'); bold.setAttribute('data-path-to-node', '1,0'); bold.textContent = 'steady';
+        const math = document.createElement('span'); math.className = 'math-inline'; math.setAttribute('data-math', 'x^2');
+        katex.render('x^2', math, { output: 'html' });
+        cell.replaceChildren(bold, document.createTextNode(' and '), math);
+        document.querySelector('footer').classList.remove('animated');
+        await new Promise(requestAnimationFrame);
+        return [cellView() === oldView, cellView().querySelector('b') === oldBold,
+            cellView().querySelector('.gemini-parser-math') === oldMath, cell.firstChild === bold];
+    }), [true, true, true, true]);
+    assert.equal(await page.evaluate(async () => {
+        const oldCell = cell;
+        cell = document.createElement('span'); cell.setAttribute('data-path-to-node', '1,0'); cell.textContent = '**replaced**';
+        oldCell.replaceWith(cell);
+        await new Promise(requestAnimationFrame);
+        return cellView()?.querySelector('b')?.textContent;
+    }), 'replaced');
+});
+
+test('table toggles, selection, off-stream updates and colors use one visible copy', async t => {
+    const page = await tableFixture(t, '<tr><td><span data-path-to-node="1,0">**cell value**</span></td><td>native</td></tr>');
+    assert.equal(await page.evaluate(() => {
+        const range = document.createRange(); range.selectNodeContents(cellView());
+        getSelection().removeAllRanges(); getSelection().addRange(range); return getSelection().toString();
+    }), 'cell value');
+    const tree = await page.locator('tbody td').first().ariaSnapshot();
+    assert.doesNotMatch(tree, /\*\*/);
+    assert.equal((tree.match(/cell value/g) || []).length, 1, tree);
+    await page.evaluate(() => {
+        engine.updateSettings({ enabled: false }); cellText.data = '**changed while off**';
+    });
+    assert.deepEqual(await page.evaluate(() => [cell.firstChild === cellText, cell.shadowRoot.firstChild.tagName,
+        cell.innerText, cell.hasAttribute('style')]), [true, 'SLOT', '**changed while off**', false]);
+    await page.evaluate(() => {
+        for (let i = 0; i < 15; i++) { engine.updateSettings({ enabled: true }); engine.updateSettings({ enabled: false }); }
+        engine.updateSettings({ enabled: true, boldColor: { color: '#ffcc66' } });
+    });
+    await page.waitForFunction(() => cellView()?.querySelector('b')?.textContent === 'changed while off');
+    assert.deepEqual(await page.evaluate(() => [cell.shadowRoot.querySelectorAll('.gp-view').length,
+        getComputedStyle(cellView().querySelector('b')).color, cell.firstChild === cellText]), [1, 'rgb(255, 204, 102)', true]);
+});
+
+test('table geometry, spanning cells and horizontal scrolling remain native and respond to width changes', async t => {
+    const page = await tableFixture(t, '<tr><td rowspan="2"><span data-path-to-node="1,0">**' + 'long value '.repeat(12) +
+        '**</span></td><td><span data-path-to-node="1,1">**other**</span></td></tr><tr><td>last</td></tr>' +
+        '<tr><td colspan="2">spanning</td></tr>');
+    await page.addStyleTag({ content: '.table-content{overflow-x:auto}table{border-collapse:collapse;width:100%}td,th{padding:8px;border:1px solid gray;vertical-align:top}' });
+    const height = await page.locator('table').evaluate(table => table.getBoundingClientRect().height);
+    await page.evaluate(() => { document.querySelector('.chat-container').style.width = '240px'; });
+    await page.waitForFunction(height => table.getBoundingClientRect().height > height, height);
+    assert.deepEqual(await page.evaluate(() => [table.querySelector('td').rowSpan,
+        table.querySelector('tr:last-child td').colSpan, table.outerHTML === tableMarkup,
+        document.querySelector('#table-copy').getBoundingClientRect().top >= table.getBoundingClientRect().bottom,
+        getComputedStyle(table).display, getComputedStyle(table.querySelector('td')).display]), [2, 2, true, true, 'table', 'table-cell']);
+    await page.evaluate(() => { table.style.minWidth = '600px'; });
+    assert.equal(await page.evaluate(() => {
+        const wrapper = table.parentElement; wrapper.scrollLeft = 50;
+        return wrapper.scrollWidth > wrapper.clientWidth && wrapper.scrollLeft === 50;
+    }), true);
+});
+
+test('cell widgets, native formula hosts and unsupported attributes stay native, including late-arriving controls', async t => {
+    const page = await tableFixture(t, '<tr><td><span data-path-to-node="1,0">**safe**</span></td><td>' +
+        '<span role="button">**widget**</span><span tabindex="0">**focus**</span><span title="tooltip">**tip**</span>' +
+        '<span class="math-inline" data-math="x">x</span><span class="citation">**cite**</span>' +
+        '<span><button>**button**</button></span></td></tr>');
+    assert.equal(await page.evaluate(() => [...table.querySelectorAll('td:nth-child(2) > span')].every(span => !span.shadowRoot)), true);
+    assert.equal(await page.evaluate(async () => {
+        const button = document.createElement('button'); button.textContent = 'native action';
+        window.cellClicks = 0; button.addEventListener('click', () => cellClicks++); cell.append(button);
+        await new Promise(requestAnimationFrame); return cellView() === null;
+    }), true);
+    await page.locator('td button').filter({ hasText: 'native action' }).click();
+    assert.equal(await page.evaluate(() => cellClicks), 1);
+    await page.evaluate(() => { cell.querySelector('button').remove(); });
+    await page.waitForFunction(() => cellView()?.querySelector('b'));
+    await page.evaluate(() => { cell.setAttribute('role', 'button'); });
+    await page.waitForFunction(() => !cellView());
+});
+
+test('cell hosts moved outside a cell release their projection and regain it when moved back', async t => {
+    const page = await tableFixture(t, '<tr><td><span data-path-to-node="1,0">**moving**</span></td><td>native</td></tr>');
+    await page.evaluate(() => document.querySelector('#response').append(cell));
+    await page.waitForFunction(() => !cellView());
+    await page.evaluate(() => table.querySelector('td').append(cell));
+    await page.waitForFunction(() => cellView()?.querySelector('b')?.textContent === 'moving');
+    assert.equal(await page.evaluate(() => cell.firstChild === cellText), true);
 });
 
 test('another component shadow root is never overwritten', async t => {
