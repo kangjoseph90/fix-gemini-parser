@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fix Gemini Parser
 // @namespace    http://tampermonkey.net/
-// @version      5.0.3
+// @version      5.0.4
 // @description  Gemini의 스트리밍 마크다운과 수식을 원본 DOM을 유지하며 렌더링합니다.
 // @author       kangjoseph90
 // @match        https://gemini.google.com/*
@@ -21,7 +21,9 @@
 
     const DEFAULTS = { enabled: true, latex: true, bold: true, italic: true, strike: true, underline: true, code: true };
     const COLOR_KEYS = ['boldColor', 'italicColor', 'strikeColor', 'underlineColor', 'codeColor', 'mathColor'];
-    const BLOCKS = 'p,h1,h2,h3,h4,h5,h6';
+    // TD/TH cannot host a shadow root. Gemini already wraps cell content in a
+    // SPAN: project on that existing node, leaving table layout/copy DOM intact.
+    const BLOCKS = 'p,h1,h2,h3,h4,h5,h6,td > span,th > span';
     const INLINE_TAGS = new Set(['SPAN', 'B', 'STRONG', 'I', 'EM', 'S', 'DEL', 'U', 'CODE', 'BR']);
     const FORMATS = { B: 'bold', STRONG: 'bold', I: 'italic', EM: 'italic', S: 'strike', DEL: 'strike', U: 'underline', CODE: 'code' };
     const EXCLUDED = 'pre,code,[contenteditable="true"],[contenteditable=""],user-query,.user-query,.query-text,[data-role="user"],.response-footer';
@@ -279,19 +281,22 @@
     }
 
     function safeBlock(element) {
-        if (!element.isConnected || !element.closest('.chat-container') || element.closest(EXCLUDED) || element.isContentEditable) return false;
+        if (!element.matches(BLOCKS) || !element.isConnected || !element.closest('.chat-container') || element.closest(EXCLUDED) || element.isContentEditable) return false;
         if (element.querySelector(BLOCKS)) return false;
-        function safeInline(child) {
-            if (!INLINE_TAGS.has(child.tagName) || child.shadowRoot || child.isContentEditable) return false;
+        function safeInline(child, host = false) {
+            if (!INLINE_TAGS.has(child.tagName) || (!host && child.shadowRoot) || child.isContentEditable) return false;
             if ([...child.attributes].some(attribute => !['class', 'style', 'dir', 'lang', 'data-path-to-node', 'data-index-in-node'].includes(attribute.name) &&
                 !attribute.name.startsWith('_ngcontent-') && !(nativeMath(child) && attribute.name === 'data-math'))) return false;
             // Gemini's finished formula is an atomic text presentation. Read its
             // expression, never clone its descendants or any interactive widget.
             if (nativeMath(child)) return !child.querySelector('a,button,input,textarea,select,[tabindex],[contenteditable],[role]');
             if (/katex|mathjax|citation|attachment|source-chip/i.test(child.className)) return false;
-            return Array.from(child.children).every(safeInline);
+            return Array.from(child.children).every(child => safeInline(child));
         }
-        return Array.from(element.children).every(safeInline);
+        // Cell spans may themselves be widgets or native math, unlike paragraph
+        // hosts. Apply the inline safety gate to the host's own attributes too.
+        if (element.tagName === 'SPAN') return !nativeMath(element) && safeInline(element, true);
+        return Array.from(element.children).every(child => safeInline(child));
     }
 
     function renderBlock(source, settings, colors, document, katex, markdown) {
@@ -468,7 +473,7 @@
             if (destroyed || !settings.enabled) return;
             counters.flushes++;
             for (const element of active.keys()) {
-                if (!element.isConnected || !element.closest('.chat-container')) { restore(element); snapshots.delete(element); }
+                if (!element.matches(BLOCKS) || !element.isConnected || !element.closest('.chat-container')) { restore(element); snapshots.delete(element); }
             }
             if (scan) {
                 containers = new Set(document.querySelectorAll('.chat-container'));
