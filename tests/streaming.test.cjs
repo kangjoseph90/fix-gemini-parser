@@ -57,7 +57,7 @@ async function fixture(t, options = {}) {
 }
 
 async function rendered(page, text) {
-    await page.waitForFunction(expected => window.view()?.textContent === expected, text);
+    await page.waitForFunction(expected => window.view()?.textContent === expected, text, { timeout: 3000 });
 }
 
 test('renders while the animated streaming footer remains, without replacing source children', async t => {
@@ -409,6 +409,91 @@ test('disabling code repair preserves the native code box inside other repaired 
         return [JSON.stringify(box(native)) === JSON.stringify(box(code)), code.textContent,
             code.classList.contains('gemini-parser-code'), view().querySelector('b').textContent];
     }), [true, 'native', false, 'bold']);
+});
+
+test('quoted Korean emphasis and strike repair without loosening identifier underscores', async t => {
+    const page = await fixture(t, { text: '**"중요"**입니다 **(괄호)**도 *"기울임"*은 ~~"취소"~~입니다 변수__이름__입니다' });
+    await rendered(page, '"중요"입니다 (괄호)도 "기울임"은 "취소"입니다 변수__이름__입니다');
+    assert.deepEqual(await page.evaluate(() => [Array.from(view().querySelectorAll('b')).map(b => b.textContent),
+        view().querySelector('i').textContent, view().querySelector('s').textContent]), [['"중요"', '(괄호)'], '"기울임"', '"취소"']);
+});
+
+test('inline code backslashes are literal and closing ticks still end the code', async t => {
+    const page = await fixture(t, { text: '`C:\\` **after**' });
+    await rendered(page, 'C:\\ after');
+    assert.deepEqual(await page.evaluate(() => [view().querySelector('code').textContent,
+        view().querySelector('b').textContent]), ['C:\\', 'after']);
+});
+
+test('code whitespace normalization matches finalized native tokens', async t => {
+    const page = await fixture(t, { text: '`` code ` x `` and `a\nb` and `   `' });
+    assert.deepEqual(await page.evaluate(() => Array.from(view().querySelectorAll('code')).map(c => c.textContent)), ['code ` x', 'a b', '   ']);
+    assert.equal(await page.evaluate(async () => {
+        const codes = Array.from(view().querySelectorAll('code'));
+        source.replaceChildren(...Array.from(view().childNodes).map(node => {
+            if (node.nodeType === 3) return node.cloneNode();
+            const code = document.createElement('code'); code.textContent = node.textContent; code.setAttribute('data-path-to-node', '0'); return code;
+        }));
+        await new Promise(requestAnimationFrame);
+        return codes.every((code, i) => view().querySelectorAll('code')[i] === code);
+    }), true);
+});
+
+test('literal HTML entity spellings are not decoded a second time from native text', async t => {
+    const page = await fixture(t, { text: '&copy; &amp; &#42; **yes**' });
+    await rendered(page, '&copy; &amp; &#42; yes');
+    assert.equal(await page.evaluate(() => source.textContent), '&copy; &amp; &#42; **yes**');
+});
+
+test('bracket LaTeX delimiters stay opaque and render instead of losing backslashes', async t => {
+    const page = await fixture(t, { text: '\\(x^2\\) **bold** \\[\\frac{a}{b}\\]' });
+    assert.deepEqual(await page.evaluate(() => [view().querySelectorAll('.katex').length,
+        view().querySelectorAll('.katex-display').length, view().querySelector('b').textContent]), [2, 1, 'bold']);
+    await page.evaluate(() => engine.updateSettings({ latex: false }));
+    await rendered(page, '\\(x^2\\) bold \\[\\frac{a}{b}\\]');
+});
+
+test('hidden and translucent native inline content keeps its presentation in the shadow view', async t => {
+    const page = await fixture(t, { html: '**fixed** <span style="display:none">hidden</span><span style="opacity:.2;visibility:hidden">faint</span><b data-path-to-node="0" style="display:none">hidden bold</b>' });
+    assert.deepEqual(await page.evaluate(() => [getComputedStyle(view().querySelector('span')).display,
+        getComputedStyle(view().querySelectorAll('span')[1]).opacity, getComputedStyle(view().querySelectorAll('span')[1]).visibility,
+        getComputedStyle(view().querySelectorAll('b')[1]).display]), ['none', '0.2', 'hidden', 'none']);
+});
+
+test('class changes on ancestors inside the chat refresh copied inline styles', async t => {
+    const page = await fixture(t, { html: '<span class="native">native</span> **fixed**' });
+    await page.evaluate(() => {
+        const style = document.createElement('style');style.textContent = '.theme .native{color:rgb(0,80,120)}';document.head.append(style);
+        document.querySelector('#response').classList.add('theme');
+    });
+    await page.waitForFunction(() => getComputedStyle(view().querySelector('span')).color === 'rgb(0, 80, 120)', null, { timeout: 1000 });
+});
+
+test('prices do not become formulas or swallow following emphasis', async t => {
+    const page = await fixture(t, { text: '가격 $20이고 **중요**합니다. cost $20 and $30; **bold**. 수식 $20$과 $2+x$' });
+    assert.deepEqual(await page.evaluate(() => [Array.from(view().querySelectorAll('b')).map(b => b.textContent),
+        Array.from(view().querySelectorAll('.gemini-parser-math')).map(m => m.getAttribute('data-math'))]), [['중요', 'bold'], ['20', '2+x']]);
+    assert.ok(await page.evaluate(() => view().textContent.includes('cost $20 and $30;')));
+});
+
+test('metadata-only spans can split inline delimiters without blocking repair', async t => {
+    const page = await fixture(t, { html: '<span data-path-to-node="0">**bo</span><span data-index-in-node="1" _ngcontent-test="">ld**</span>' });
+    await rendered(page, 'bold');
+    assert.deepEqual(await page.evaluate(() => [view().querySelectorAll('b').length, source.innerHTML === originalMarkup]), [1, true]);
+});
+
+test('nested underline pairs ignore tag spellings inside opaque code and math', async t => {
+    const page = await fixture(t, { text: '<u>outer <u>inner</u> `</u>` $\\text{</u>}$ tail</u>' });
+    assert.deepEqual(await page.evaluate(() => [view().querySelector('u u')?.textContent,
+        view().querySelector('u code')?.textContent, view().querySelector('u .gemini-parser-math')?.getAttribute('data-math'),
+        view().lastChild.tagName, view().lastChild.lastChild.textContent]), ['inner', '</u>', '\\text{</u>}', 'U', ' tail']);
+});
+
+test('native math visibility and opacity survive projection', async t => {
+    const page = await fixture(t, { html: '**fixed** <span class="math-inline" data-math="x" style="display:none">x</span><span class="math-inline" data-math="y" style="opacity:.2;visibility:hidden">y</span>' });
+    assert.deepEqual(await page.evaluate(() => { const maths = view().querySelectorAll('.gemini-parser-math');return [
+        getComputedStyle(maths[0]).display, getComputedStyle(maths[1]).opacity, getComputedStyle(maths[1]).visibility];
+    }), ['none', '0.2', 'hidden']);
 });
 
 test('new interactive content is shown natively before the next animation frame', async t => {
