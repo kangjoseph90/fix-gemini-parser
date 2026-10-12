@@ -231,7 +231,13 @@
                     flush();
                     // Native formulas stay formatted even with the repair toggle
                     // off, just as native <b>/<code> formatting does.
-                    fragment.appendChild(mathView(child.getAttribute('data-math'), !!child.querySelector('.katex-display'), document, katex));
+                    try {
+                        fragment.appendChild(mathView(child.getAttribute('data-math'), !!child.querySelector('.katex-display'), document, katex));
+                    } catch {
+                        // A malformed final formula must not reset the rest of
+                        // the paragraph or repeatedly switch display ownership.
+                        appendLiteral(fragment, child.textContent || child.getAttribute('data-math'), document);
+                    }
                     changed = true; return;
                 }
                 // Gemini can split one token across adjacent Text nodes/spans.
@@ -348,6 +354,9 @@
         function process(element) {
             if (!safeBlock(element)) { restore(element); snapshots.delete(element); return; }
             if (element.shadowRoot && element.shadowRoot !== roots.get(element)) return;
+            // Keep native formulas visible until their projection stylesheet is
+            // ready; otherwise startup would briefly show unstyled math/text.
+            if (!katexCss && element.querySelector('.math-inline[data-math]')) { restore(element); snapshots.delete(element); return; }
             const snapshot = element.innerHTML; // Read only; excludes the shadow tree.
             const previous = snapshots.get(element);
             if (previous?.source === snapshot && previous.revision === revision) return;
