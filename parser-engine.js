@@ -1,0 +1,390 @@
+/* Shared, non-destructive rendering engine for the extension and userscript. */
+(function (global) {
+    'use strict';
+
+    const DEFAULTS = { enabled: true, latex: true, bold: true, italic: true, strike: true, underline: true, code: true };
+    const COLOR_KEYS = ['boldColor', 'italicColor', 'strikeColor', 'underlineColor', 'codeColor', 'mathColor'];
+    const BLOCKS = 'p,h1,h2,h3,h4,h5,h6';
+    const INLINE_TAGS = new Set(['SPAN', 'B', 'STRONG', 'I', 'EM', 'S', 'DEL', 'U', 'CODE', 'BR']);
+    const FORMATS = { B: 'bold', STRONG: 'bold', I: 'italic', EM: 'italic', S: 'strike', DEL: 'strike', U: 'underline', CODE: 'code' };
+    const EXCLUDED = 'pre,code,[contenteditable="true"],[contenteditable=""],user-query,.user-query,.query-text,[data-role="user"],.response-footer';
+    const INLINE_STYLE = ['color', 'background-color', 'font-family', 'font-size', 'font-weight', 'font-style',
+        'line-height', 'letter-spacing', 'text-decoration', 'white-space', 'vertical-align'];
+    const BASE_CSS = `
+        .gp-original { position: absolute; width: 0; height: 0; overflow: hidden;
+            opacity: 0; pointer-events: none; user-select: none; }
+        .gp-view { white-space: inherit; }
+        .gemini-parser-code { font-family: monospace; white-space: pre-wrap; }
+        .gemini-parser-math .katex { font-size: 1.1em; }
+    `;
+
+    function runLength(text, index, character) {
+        let end = index;
+        while (text[end] === character) end++;
+        return end - index;
+    }
+
+    function escaped(text, index) {
+        let count = 0;
+        while (index > 0 && text[--index] === '\\') count++;
+        return count % 2 === 1;
+    }
+
+    function closing(text, from, delimiter) {
+        for (let i = from; i <= text.length - delimiter.length; i++) {
+            if (escaped(text, i) || !text.startsWith(delimiter, i)) continue;
+            const character = delimiter[0];
+            if ('*`$~'.includes(character) && (text[i - 1] === character || runLength(text, i, character) !== delimiter.length)) continue;
+            return i;
+        }
+        return -1;
+    }
+
+    function appendLiteral(parent, text, document) {
+        text.split('\n').forEach((line, index) => {
+            if (index) parent.appendChild(document.createElement('br'));
+            if (line) parent.appendChild(document.createTextNode(line));
+        });
+    }
+
+    // Use markdown-it's delimiter balancing for nested emphasis. Only inline
+    // formatting is enabled; links, images and raw HTML are never generated.
+    function tokenizer(markdownit) {
+        const markdown = markdownit({ html: false, linkify: false }).disable(['link', 'image', 'autolink']);
+        markdown.inline.ruler.at('text', (state, silent) => {
+            let end = state.pos;
+            while (end < state.posMax && !/[\n\\`*_[\]!<&~$]/.test(state.src[end])) end++;
+            if (end === state.pos) return false;
+            if (!silent) state.pending += state.src.slice(state.pos, end);
+            state.pos = end; return true;
+        });
+        function opaque(state, type, delimiter, endDelimiter = delimiter) {
+            const start = state.pos;
+            const end = closing(state.src, start + delimiter.length, endDelimiter);
+            const token = state.push(end < 0 ? 'text' : type, '', 0);
+            const finish = end < 0 ? state.posMax : end + endDelimiter.length;
+            token.content = end < 0 ? state.src.slice(start) : state.src.slice(start + delimiter.length, end);
+            token.markup = delimiter;
+            token.meta = { raw: state.src.slice(start, finish), endDelimiter };
+            state.pos = finish;
+            return true;
+        }
+        markdown.inline.ruler.at('backticks', (state, silent) => {
+            if (state.src[state.pos] !== '`') return false;
+            if (silent) return false;
+            return opaque(state, 'code_inline', '`'.repeat(runLength(state.src, state.pos, '`')));
+        });
+        markdown.inline.ruler.before('escape', 'gp_math', (state, silent) => {
+            if (state.src[state.pos] !== '$') return false;
+            const length = runLength(state.src, state.pos, '$');
+            if (silent) return false;
+            if (length > 2) {
+                state.pending += '$'.repeat(length); state.pos += length; return true;
+            }
+            if (!state.env.settings.latex && closing(state.src, state.pos + length, '$'.repeat(length)) < 0) return false;
+            return opaque(state, 'gp_math', '$'.repeat(length));
+        });
+        markdown.inline.ruler.before('escape', 'gp_underline', (state, silent) => {
+            if (!state.src.startsWith('<u>', state.pos) || silent || !state.env.settings.underline) return false;
+            return opaque(state, 'gp_underline', '<u>', '</u>');
+        });
+        return markdown;
+    }
+
+    function parseText(text, options, document, katex, markdown, depth = 0) {
+        const fragment = document.createDocumentFragment();
+        if (depth > 24 || !['bold', 'italic', 'strike', 'underline', 'code', 'latex'].some(key => options[key])) {
+            appendLiteral(fragment, text, document); return { fragment, changed: false };
+        }
+        const tokens = markdown.parseInline(text, { settings: options })[0].children;
+        const stack = [fragment];
+        let plain = '';
+        let transformed = false;
+        function literal(value) { appendLiteral(stack.at(-1), value, document); plain += value; }
+        for (const token of tokens) {
+            const type = { strong: 'bold', em: 'italic', s: 'strike' }[token.type.replace(/_(open|close)$/, '')];
+            if (type && token.nesting) {
+                if (token.nesting === 1) {
+                    if (options[type]) {
+                        const wrapper = document.createElement({ bold: 'b', italic: 'i', strike: 's' }[type]);
+                        wrapper.className = `gemini-parser-${type}`;
+                        stack.at(-1).appendChild(wrapper); stack.push(wrapper); transformed = true;
+                    } else { literal(token.markup); stack.push(stack.at(-1)); }
+                } else {
+                    stack.pop(); if (!options[type]) literal(token.markup);
+                }
+            } else if (token.type === 'code_inline') {
+                if (!options.code) { literal(token.meta.raw); continue; }
+                const code = document.createElement('code'); code.className = 'gemini-parser-code'; code.textContent = token.content;
+                stack.at(-1).appendChild(code); plain += token.content; transformed = true;
+            } else if (token.type === 'gp_math') {
+                if (!options.latex || !katex || !token.content) { literal(token.meta.raw); continue; }
+                const math = document.createElement('span'); math.className = 'math-inline gemini-parser-math';
+                math.setAttribute('data-math', token.content);
+                try {
+                    // KaTeX's DOM renderer avoids innerHTML/Trusted Types sinks.
+                    katex.render(token.content, math, { throwOnError: true, output: 'htmlAndMathml', displayMode: token.markup === '$$',
+                        trust: false, maxExpand: 1000, maxSize: 20 });
+                    stack.at(-1).appendChild(math); transformed = true;
+                } catch { literal(token.meta.raw); }
+            } else if (token.type === 'gp_underline') {
+                const nested = parseText(token.content, options, document, katex, markdown, depth + 1);
+                const underline = document.createElement('u'); underline.className = 'gemini-parser-underline';
+                underline.appendChild(nested.fragment); stack.at(-1).appendChild(underline); transformed = true;
+            } else if (token.type === 'softbreak' || token.type === 'hardbreak') literal('\n');
+            else literal(token.content);
+        }
+        return { fragment, changed: transformed || plain !== text };
+    }
+
+    function safeBlock(element) {
+        if (!element.isConnected || !element.closest('.chat-container') || element.closest(EXCLUDED) || element.isContentEditable) return false;
+        if (element.querySelector(BLOCKS)) return false;
+        for (const child of element.querySelectorAll('*')) {
+            if (!INLINE_TAGS.has(child.tagName) || child.shadowRoot || child.isContentEditable) return false;
+            if (/katex|mathjax|citation|attachment|source-chip/i.test(child.className)) return false;
+            if ([...child.attributes].some(attribute => !['class', 'style', 'dir', 'lang'].includes(attribute.name))) return false;
+        }
+        return true;
+    }
+
+    function renderBlock(source, settings, colors, document, katex, markdown) {
+        let changed = false;
+        function childrenOf(node) {
+            const fragment = document.createDocumentFragment();
+            let text = '';
+            function flush() {
+                if (!text) return;
+                const parsed = parseText(text, settings, document, katex, markdown);
+                fragment.appendChild(parsed.fragment); changed ||= parsed.changed; text = '';
+            }
+            function visit(child) {
+                if (child.nodeType === 3) { text += child.nodeValue; return; }
+                if (child.nodeType !== 1) return;
+                // Gemini can split one token across adjacent Text nodes/spans.
+                if (child.tagName === 'SPAN' && child.attributes.length === 0) {
+                    child.childNodes.forEach(visit); return;
+                }
+                flush();
+                const copy = document.createElement(child.tagName.toLowerCase());
+                const computed = global.getComputedStyle(child);
+                INLINE_STYLE.forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
+                ['dir', 'lang'].forEach(name => { if (child.hasAttribute(name)) copy.setAttribute(name, child.getAttribute(name)); });
+                const type = FORMATS[child.tagName];
+                if (type && settings[type]) {
+                    copy.classList.add(`gemini-parser-${type}`);
+                    changed ||= !!colors[`${type}Color`];
+                }
+                if (child.tagName === 'CODE') copy.textContent = child.textContent;
+                else copy.appendChild(childrenOf(child));
+                fragment.appendChild(copy);
+            }
+            node.childNodes.forEach(visit); flush(); return fragment;
+        }
+        const fragment = childrenOf(source);
+        return { fragment, changed };
+    }
+
+    function styleRules(colors, document) {
+        return COLOR_KEYS.map(key => {
+            const value = colors[key];
+            if (!value) return '';
+            const declaration = document.createElement('span').style;
+            declaration.cssText = value.customCss || '';
+            if (value.color) declaration.setProperty('color', value.color);
+            if (Number.isFinite(value.opacity)) declaration.setProperty('opacity', String(Math.max(0, Math.min(100, value.opacity)) / 100));
+            Array.from(declaration).forEach(property => declaration.setProperty(property, declaration.getPropertyValue(property), 'important'));
+            return `.gemini-parser-${key.slice(0, -5)} { ${declaration.cssText} }`;
+        }).join('\n');
+    }
+
+    function createEngine(options = {}) {
+        const document = options.document || global.document;
+        const markdown = tokenizer(options.markdownit || global.markdownit);
+        const settings = { ...DEFAULTS, ...options.settings };
+        const colors = Object.fromEntries(COLOR_KEYS.map(key => [key, options.settings?.[key] ?? null]));
+        const roots = new WeakMap();
+        const snapshots = new WeakMap();
+        const active = new Map();
+        const dirty = new Set();
+        let katexCss = options.katexCss || '';
+        let revision = 0;
+        let timer = null;
+        let scan = false;
+        let destroyed = false;
+        let observing = false;
+        let disclaimerStyle = null;
+        let fontStyle = null;
+        let containers = new Set();
+        let sharedSheet = null;
+        let sheetRevision = -1;
+        let styleText = '';
+        if (global.CSSStyleSheet?.prototype.replaceSync) sharedSheet = new global.CSSStyleSheet();
+        const counters = { flushes: 0, renderWrites: 0 };
+
+        function restore(element) {
+            const root = roots.get(element);
+            if (root) {
+                root.adoptedStyleSheets = [];
+                root.replaceChildren(document.createElement('slot'));
+            }
+            active.delete(element);
+        }
+
+        function styles() {
+            if (sheetRevision !== revision) {
+                const css = BASE_CSS + katexCss.replace(/@font-face\s*\{[^}]+\}/g, '') + '\n' + styleRules(colors, document);
+                if (css !== styleText) { styleText = css; sharedSheet?.replaceSync(css); }
+                sheetRevision = revision;
+            }
+            return styleText;
+        }
+
+        function projection(element) {
+            let root = roots.get(element);
+            if (!root) {
+                // Never take over another component's shadow root.
+                if (element.shadowRoot) return null;
+                try { root = element.attachShadow({ mode: 'open' }); }
+                catch { return null; }
+                roots.set(element, root);
+            }
+            const css = styles();
+            const style = sharedSheet ? null : document.createElement('style');
+            if (style) style.textContent = css;
+            else root.adoptedStyleSheets = [sharedSheet];
+            const original = document.createElement('span');
+            original.className = 'gp-original'; original.setAttribute('aria-hidden', 'true');
+            original.appendChild(document.createElement('slot'));
+            const view = document.createElement('span'); view.className = 'gp-view';
+            // The clipped slot keeps light-DOM innerText usable by native copy
+            // handlers, but is excluded from selection/accessibility. Only the
+            // preview takes space in normal flow. Original children never move.
+            root.replaceChildren(...(style ? [style, original, view] : [original, view]));
+            const entry = { root, style, view };
+            active.set(element, entry); return entry;
+        }
+
+        function process(element) {
+            if (!safeBlock(element)) { restore(element); snapshots.delete(element); return; }
+            if (element.shadowRoot && element.shadowRoot !== roots.get(element)) return;
+            const snapshot = element.innerHTML; // Read only; excludes the shadow tree.
+            const previous = snapshots.get(element);
+            if (previous?.source === snapshot && previous.revision === revision) return;
+            snapshots.set(element, { source: snapshot, revision });
+            try {
+                const parsed = renderBlock(element, settings, colors, document, katexCss ? options.katex : null, markdown);
+                if (!parsed.changed) { if (active.has(element)) restore(element); return; }
+                const entry = active.get(element) || projection(element);
+                if (!entry) return;
+                const css = styles();
+                if (entry.style && entry.style.textContent !== css) entry.style.textContent = css;
+                entry.view.replaceChildren(parsed.fragment); counters.renderWrites++;
+            } catch (error) {
+                restore(element);
+                console.warn('[Gemini Parser] Kept native content after rendering error:', error);
+            }
+        }
+
+        function flush() {
+            timer = null;
+            if (destroyed || !settings.enabled) return;
+            counters.flushes++;
+            for (const element of active.keys()) {
+                if (!element.isConnected || !element.closest('.chat-container')) { restore(element); snapshots.delete(element); }
+            }
+            if (scan) {
+                containers = new Set(document.querySelectorAll('.chat-container'));
+                containers.forEach(container => container.querySelectorAll(BLOCKS).forEach(element => dirty.add(element)));
+                scan = false;
+            }
+            const batch = [...dirty]; dirty.clear();
+            batch.forEach(process);
+        }
+
+        function schedule(fullScan = false) {
+            if (destroyed || !settings.enabled) return;
+            scan ||= fullScan;
+            // Fixed coalescing window: continuous token arrival cannot postpone it.
+            if (timer === null) timer = global.setTimeout(flush, options.interval ?? 40);
+        }
+
+        const observer = new global.MutationObserver(records => {
+            let fullScan = false;
+            for (const record of records) {
+                const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+                const block = target?.closest(BLOCKS);
+                if (block && (block.closest('.chat-container') || active.has(block))) {
+                    dirty.add(block);
+                    if (record.type === 'attributes') snapshots.delete(block);
+                } else if (record.type === 'childList' || target?.closest('.chat-container') || containers.has(target)) fullScan = true;
+                // Inline styles copied into the preview must follow ancestor
+                // theme changes too, even though the source HTML is unchanged.
+                if (record.type === 'attributes' && ['class', 'style'].includes(record.attributeName) &&
+                    [...containers].some(container => target === container || target?.contains(container))) {
+                    revision++; fullScan = true;
+                }
+            }
+            if (fullScan || dirty.size) schedule(fullScan);
+        });
+
+        function start() {
+            if (destroyed || !settings.enabled || observing) return;
+            observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
+            observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style'] });
+            observing = true;
+            disclaimerStyle = document.createElement('style');
+            disclaimerStyle.textContent = 'hallucination-disclaimer { display: block !important; visibility: hidden !important; height: 16px !important; overflow: hidden !important; }';
+            document.head.appendChild(disclaimerStyle);
+            updateFonts();
+            scan = true; flush();
+        }
+
+        function stop() {
+            observer.disconnect(); observing = false;
+            if (timer !== null) global.clearTimeout(timer);
+            timer = null; dirty.clear(); scan = false;
+            for (const element of active.keys()) restore(element);
+            disclaimerStyle?.remove(); disclaimerStyle = null;
+            fontStyle?.remove(); fontStyle = null; containers.clear();
+        }
+
+        function updateFonts() {
+            if (!settings.enabled || !katexCss) return;
+            // Chromium does not register @font-face rules defined only inside a
+            // shadow root. Register just the font faces in the document scope.
+            if (!fontStyle) { fontStyle = document.createElement('style'); document.head.appendChild(fontStyle); }
+            fontStyle.textContent = (katexCss.match(/@font-face\s*\{[^}]+\}/g) || []).join('\n');
+        }
+
+        function updateSettings(values = {}) {
+            if (destroyed) return;
+            let changed = false;
+            for (const key of Object.keys(DEFAULTS)) {
+                if (typeof values[key] === 'boolean' && values[key] !== settings[key]) { settings[key] = values[key]; changed = true; }
+            }
+            for (const key of COLOR_KEYS) {
+                if (Object.hasOwn(values, key) && JSON.stringify(values[key]) !== JSON.stringify(colors[key])) {
+                    colors[key] = values[key]; changed = true;
+                }
+            }
+            if (!changed) return;
+            revision++;
+            if (!settings.enabled) stop();
+            else if (!observing) start();
+            else schedule(true);
+        }
+
+        const api = {
+            updateSettings,
+            setKatexCss(css) { if (!destroyed && css !== katexCss) { katexCss = css; revision++; updateFonts(); schedule(true); } },
+            refresh() { revision++; schedule(true); },
+            destroy() { stop(); destroyed = true; },
+            diagnostics() { return { ...counters, enabled: settings.enabled, activeProjections: active.size, pendingBlocks: dirty.size }; }
+        };
+        start();
+        return api;
+    }
+
+    global.GeminiParser = { createEngine, DEFAULTS, COLOR_KEYS };
+})(globalThis);
