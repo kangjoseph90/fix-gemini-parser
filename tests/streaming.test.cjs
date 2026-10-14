@@ -60,6 +60,253 @@ async function rendered(page, text) {
     await page.waitForFunction(expected => window.view()?.textContent === expected, text, { timeout: 3000 });
 }
 
+async function dragRendered(page, firstSelector, lastSelector = firstSelector) {
+    const points = await page.evaluate(({ firstSelector, lastSelector }) => {
+        const first = view().querySelector(firstSelector), last = view().querySelector(lastSelector);
+        const a = first.getBoundingClientRect(), b = last.getBoundingClientRect();
+        return { start: { x: a.left - 1, y: a.top + a.height / 2 }, end: { x: b.right + 1, y: b.top + b.height / 2 } };
+    }, { firstSelector, lastSelector });
+    await page.mouse.move(points.start.x, points.start.y); await page.mouse.down();
+    await page.mouse.move(points.end.x, points.end.y, { steps: 12 }); await page.mouse.up();
+}
+
+async function mockCopy(page) {
+    return page.evaluate(() => {
+        const data = {};
+        const event = new Event('copy', { bubbles: true, cancelable: true, composed: true });
+        Object.defineProperty(event, 'clipboardData', { value: { setData: (type, value) => { data[type] = value; } } });
+        document.dispatchEvent(event);
+        return { data, prevented: event.defaultPrevented };
+    });
+}
+
+test('mixed nested citation wrappers repair both text levels without moving native widgets', async t => {
+    const page = await fixture(t, { html: '**outside** <span data-path-to-node="0"><span>**inside** <sources-carousel-inline><button>PNG</button></sources-carousel-inline></span></span>' });
+    assert.deepEqual(await page.evaluate(() => {
+        window.chip = source.querySelector('button'); window.wrapper = chip.parentElement.parentElement;
+        window.calls = 0; chip.addEventListener('click', () => calls++);
+        return [view().querySelector('b').textContent, wrapper.shadowRoot.querySelector('b').textContent, source.innerHTML === originalMarkup];
+    }), ['outside', 'inside', true]);
+    await page.locator('#answer button').click();
+    assert.equal(await page.evaluate(() => calls), 1);
+    await page.evaluate(() => { wrapper.firstChild.data = '**updated** '; chip.focus(); });
+    await page.waitForFunction(() => wrapper.shadowRoot.querySelector('b').textContent === 'updated');
+    assert.equal(await page.evaluate(() => document.activeElement === chip && chip.parentElement.parentElement === wrapper), true);
+    await page.evaluate(() => engine.updateSettings({ enabled: false }));
+    assert.equal(await page.evaluate(() => !view() && !wrapper.shadowRoot.querySelector('.gp-view') && chip.getBoundingClientRect().height > 0), true);
+    await page.evaluate(() => engine.updateSettings({ enabled: true }));
+    await page.waitForFunction(() => view()?.querySelector('b') && wrapper.shadowRoot.querySelector('b'));
+});
+
+test('links and unknown live elements only exclude their own subtree from repair', async t => {
+    const page = await fixture(t, { html: '**outside** <a href="#target">**link**</a> <button>**button**</button> <span data-href="native">**opaque**</span>' });
+    assert.equal(await page.evaluate(() => view().querySelector('b').textContent), 'outside');
+    await page.evaluate(() => {
+        window.link = source.querySelector('a'); window.linkClicks = 0;
+        link.addEventListener('click', event => { event.preventDefault(); linkClicks++; });
+    });
+    await page.locator('#answer a').click();
+    assert.deepEqual(await page.evaluate(() => [linkClicks, link.textContent, source.innerHTML === originalMarkup, link.parentElement === source]), [1, '**link**', true, true]);
+});
+
+test('a widget arriving inside a previously flattened span mounts nested projections before paint', async t => {
+    const page = await fixture(t, { html: '**outside** <span><span>**inside** </span></span>' });
+    assert.equal(await page.evaluate(async () => {
+        const wrapper = source.querySelector('span span');
+        const chip = document.createElement('sources-carousel-inline'); chip.append(Object.assign(document.createElement('button'), { textContent: 'PNG' }));
+        wrapper.append(chip);
+        await new Promise(requestAnimationFrame);
+        return !!view()?.querySelector('b') && wrapper.shadowRoot?.querySelector('b')?.textContent === 'inside' && chip.getBoundingClientRect().height > 0;
+    }), true);
+});
+
+test('sup/sub/mark and inert sanitizer metadata preserve presentation beside repaired text', async t => {
+    const page = await fixture(t, { html: '<span data-sourcepos="1:1-1:12" data-fencelength="2" data-infolength="0">**outside**</span> H<sup>2</sup> O<sub>2</sub> <mark>highlight</mark>' });
+    assert.equal(await page.evaluate(() => view().querySelector('b').textContent), 'outside');
+    assert.deepEqual(await page.evaluate(() => ['sup', 'sub', 'mark'].map(tag => getComputedStyle(view().querySelector(tag)).verticalAlign)), ['super', 'sub', 'baseline']);
+    assert.equal(await page.evaluate(() => getComputedStyle(view().querySelector('mark')).backgroundColor), 'rgb(255, 255, 0)');
+    assert.equal(await page.evaluate(() => source.innerHTML === originalMarkup), true);
+});
+
+test('currency unit suffixes do not swallow later formatting or valid closed math', async t => {
+    const page = await fixture(t, { text: 'Price $10/month **sale**; $9.99/월 *offer*; $10/x$' });
+    assert.deepEqual(await page.evaluate(() => [view().querySelector('b').textContent, view().querySelector('i').textContent,
+        view().querySelector('.gemini-parser-math').getAttribute('data-math')]), ['sale', 'offer', '10/x']);
+    assert.match(await page.evaluate(() => view().textContent), /\$10\/month sale/);
+});
+
+test('tokens cross dir spans while native stylesheet presentation and theme updates survive', async t => {
+    const page = await fixture(t, { html: '<span data-path-to-node="0" dir="auto">**bo</span><span data-path-to-node="1">ld**</span>' });
+    await rendered(page, 'bold');
+    assert.equal(await page.evaluate(() => view().querySelectorAll('b').length), 1);
+    assert.equal(await page.evaluate(() => view().querySelector('[dir="auto"]').textContent), 'bo');
+    await page.addStyleTag({ content: '#answer > span {color:rgb(10,20,30);font-size:28px}' });
+    await page.waitForFunction(() => getComputedStyle(view().querySelector('b span')).fontSize === '28px');
+    assert.equal(await page.evaluate(() => getComputedStyle(view().querySelector('b span')).color), 'rgb(10, 20, 30)');
+    await page.evaluate(() => engine.updateSettings({ boldColor: { color: '#ffee00' } }));
+    await page.waitForFunction(() => getComputedStyle(view().querySelector('b span')).color === 'rgb(255, 238, 0)');
+    assert.equal(await page.evaluate(() => source.innerHTML === originalMarkup), true);
+});
+
+test('native display and custom math finalization retains projection and formula identity', async t => {
+    for (const [tag, className, displayMode] of [['span', 'math-block', true], ['math-block', '', true], ['math-inline', '', false]]) {
+        const page = await fixture(t, { text: displayMode ? '**title** $$x^2$$' : '**title** $x^2$' });
+        await page.evaluate(({ tag, className, displayMode }) => {
+            window.previousMath = view().querySelector('.gemini-parser-math');
+            const bold = document.createElement('b'); bold.setAttribute('data-path-to-node', '0'); bold.textContent = 'title';
+            const math = document.createElement(tag); if (className) math.className = className;
+            math.setAttribute('data-math', 'x^2'); katex.render('x^2', math, { displayMode });
+            source.replaceChildren(bold, document.createTextNode(' '), math);
+        }, { tag, className, displayMode });
+        await page.waitForFunction(() => view()?.querySelector('.gemini-parser-math')?.getAttribute('data-math') === 'x^2');
+        await page.waitForTimeout(60);
+        assert.equal(await page.evaluate(() => view().querySelector('.gemini-parser-math') === previousMath), true);
+        assert.equal(await page.evaluate(() => !!view().querySelector('.katex-display')), displayMode);
+    }
+});
+
+test('bare list items render through their existing list parent and restore unchanged native source', async t => {
+    const page = await fixture(t, { text: '**paragraph**' });
+    await page.evaluate(() => {
+        window.list = document.createElement('ol'); list.setAttribute('start', '3');
+        list.innerHTML = '<li id="bare">**item** $x$<ul><li>*nested*</li></ul></li>';
+        source.parentElement.append(list); window.item = list.firstChild; window.listMarkup = list.outerHTML;
+    });
+    await page.waitForFunction(() => source.parentElement.shadowRoot?.querySelector('.gp-view ol li b'));
+    assert.deepEqual(await page.evaluate(() => [source.parentElement.shadowRoot.querySelector('b').textContent,
+        !!source.parentElement.shadowRoot.querySelector('.katex'), list.outerHTML === listMarkup, item.parentElement === list,
+        view().querySelector('b').textContent]), ['item', true, true, true, 'paragraph']);
+    await page.evaluate(() => { item.firstChild.data = '**updated** '; });
+    await page.waitForFunction(() => source.parentElement.shadowRoot.querySelector('b').textContent === 'updated');
+    await page.evaluate(() => engine.updateSettings({ enabled: false }));
+    assert.equal(await page.evaluate(() => item.getBoundingClientRect().height > 0 && !source.parentElement.shadowRoot.querySelector('.gp-view')), true);
+});
+
+test('pointer selection copies projected text and rich HTML before Gemini can overwrite the clipboard', async t => {
+    const page = await fixture(t, { text: '**alpha** unselected remainder' });
+    await page.evaluate(() => {
+        source.parentElement.classList.add('model-response-text'); window.nativeCopies = 0;
+        document.addEventListener('copy', event => { nativeCopies++; event.clipboardData.setData('text/html', 'native empty range'); });
+    });
+    await dragRendered(page, 'b');
+    assert.equal(await page.evaluate(() => getSelection().toString()), 'alpha');
+    assert.equal(await page.evaluate(() => getSelection().getRangeAt(0).collapsed), true);
+    const result = await mockCopy(page);
+    assert.equal(result.prevented, true); assert.equal(result.data['text/plain'], 'alpha');
+    assert.match(result.data['text/html'], /alpha/); assert.doesNotMatch(result.data['text/html'], /unselected|gp-original|\*\*/);
+    assert.match(result.data['text/html'], /<b\b/);
+    assert.equal(await page.evaluate(() => nativeCopies), 0);
+});
+
+test('pointer-selected math appears once in plain and HTML copies with accessible MathML retained', async t => {
+    const page = await fixture(t, { text: '**before** $x^2$ **after**' });
+    await dragRendered(page, 'b:first-child', 'b:last-child');
+    const selection = await page.evaluate(() => getSelection().toString());
+    assert.equal((selection.match(/x/g) || []).length, 1); assert.doesNotMatch(selection, /𝑥/);
+    const result = await mockCopy(page);
+    assert.equal(result.prevented, true); assert.match(result.data['text/plain'], /before[\s\S]*x[\s\S]*after/); assert.equal((result.data['text/plain'].match(/x/g) || []).length, 1);
+    assert.doesNotMatch(result.data['text/html'], /katex-mathml|gp-original/); assert.match(result.data['text/html'], /katex-html/);
+    assert.equal(await page.evaluate(() => !!view().querySelector('.katex-mathml math')), true);
+});
+
+test('copy of ordinary native text, inputs and disabled projections stays on the native path', async t => {
+    const page = await fixture(t);
+    await page.evaluate(() => {
+        const range = document.createRange(); range.selectNodeContents(document.querySelector('#outside'));
+        getSelection().removeAllRanges(); getSelection().addRange(range);
+    });
+    assert.deepEqual(await mockCopy(page), { data: {}, prevented: false });
+    await page.evaluate(() => {
+        const button = Object.assign(document.createElement('button'), {textContent: 'native widget'}); source.append(button);
+    });
+    await page.waitForFunction(() => view()?.querySelector('slot[data-gp-native]'));
+    await page.evaluate(() => {
+        const range = document.createRange(); range.selectNodeContents(source.querySelector('button'));
+        getSelection().removeAllRanges(); getSelection().addRange(range);
+    });
+    assert.deepEqual(await mockCopy(page), { data: {}, prevented: false });
+    await page.evaluate(() => engine.updateSettings({ enabled: false }));
+    await page.evaluate(() => {
+        const range = document.createRange(); range.selectNodeContents(source);
+        getSelection().removeAllRanges(); getSelection().addRange(range);
+    });
+    assert.deepEqual(await mockCopy(page), { data: {}, prevented: false });
+});
+
+test('bare lists directly in a chat container render without taking over slotted native selections', async t => {
+    const page = await fixture(t);
+    await page.evaluate(() => {
+        const list = document.createElement('ul'); list.innerHTML = '<li>**direct item**</li>';
+        document.querySelector('.chat-container').append(list);
+    });
+    await page.waitForFunction(() => document.querySelector('.chat-container').shadowRoot?.querySelector('li b'));
+    assert.equal(await page.evaluate(() => document.querySelector('.chat-container').shadowRoot.querySelector('li b').textContent), 'direct item');
+});
+
+test('rich copy joins separate shadow paragraphs without hidden source or unselected tails', async t => {
+    const page = await fixture(t, { text: '**alpha**' });
+    await page.evaluate(() => {
+        const next = document.createElement('p'); next.id = 'next'; next.textContent = '**beta** trailing'; source.after(next);
+    });
+    await page.waitForFunction(() => document.querySelector('#next').shadowRoot?.querySelector('b'));
+    const points = await page.evaluate(() => {
+        const first = view().querySelector('b').getBoundingClientRect();
+        const last = document.querySelector('#next').shadowRoot.querySelector('b').getBoundingClientRect();
+        return [first.left - 1, first.top + first.height / 2, last.right + 1, last.top + last.height / 2];
+    });
+    await page.mouse.move(points[0], points[1]); await page.mouse.down();
+    await page.mouse.move(points[2], points[3], { steps: 20 }); await page.mouse.up();
+    const result = await mockCopy(page);
+    assert.equal(result.prevented, true);
+    assert.match(result.data['text/plain'], /alpha[\s\S]*beta/); assert.doesNotMatch(result.data['text/plain'], /\*\*|trailing/);
+    assert.equal((result.data['text/html'].match(/alpha/g) || []).length, 1);
+    assert.equal((result.data['text/html'].match(/beta/g) || []).length, 1);
+    assert.doesNotMatch(result.data['text/html'], /gp-original|\*\*|trailing/);
+});
+
+test('copy crossing native endpoints and projected paragraphs preserves the selected interval', async t => {
+    const page = await fixture(t);
+    await page.evaluate(() => {
+        source.before(Object.assign(document.createElement('p'), { id: 'native-first', textContent: 'native first' }));
+        source.after(Object.assign(document.createElement('p'), { id: 'native-last', textContent: 'native last' }));
+    });
+    const a = await page.locator('#native-first').boundingBox(), b = await page.locator('#native-last').boundingBox();
+    // Paragraphs occupy the full block width; finish after the last text glyph.
+    const lastRight = await page.evaluate(() => { const range = document.createRange(); range.selectNodeContents(document.querySelector('#native-last')); return range.getBoundingClientRect().right; });
+    await page.mouse.move(a.x - 1, a.y + a.height / 2); await page.mouse.down();
+    await page.mouse.move(lastRight + 1, b.y + b.height / 2, { steps: 20 }); await page.mouse.up();
+    const result = await mockCopy(page);
+    assert.equal(result.prevented, true); assert.match(result.data['text/html'], /native first[\s\S]*<b\b[\s\S]*alpha[\s\S]*native last/);
+    assert.doesNotMatch(result.data['text/html'], /gp-original|\*\*/);
+});
+
+test('nested projection copy includes a live citation once and preserves partial text formatting', async t => {
+    const page = await fixture(t, { html: '**first** <span><span>**inner** <sources-carousel-inline><button>PNG</button></sources-carousel-inline></span></span> **last**' });
+    await dragRendered(page, 'b:first-child', 'b:last-child');
+    const result = await mockCopy(page);
+    assert.equal(result.prevented, true);
+    assert.equal((result.data['text/html'].match(/PNG/g) || []).length, 1);
+    assert.match(result.data['text/html'], /first[\s\S]*inner[\s\S]*PNG[\s\S]*last/);
+    assert.doesNotMatch(result.data['text/html'], /gp-original|\*\*/);
+});
+
+test('presentation runs retain atom direction, visibility and distinct styles without bleeding into adjacent text', async t => {
+    const page = await fixture(t, { html: '<span style="color:rgb(10,20,30)" dir="rtl">**bright** $x$</span> **ordinary** <span style="display:none">$y$</span>' });
+    assert.equal(await page.evaluate(() => getComputedStyle(view().querySelector('b span')).color), 'rgb(10, 20, 30)');
+    assert.equal(await page.evaluate(() => getComputedStyle(view().querySelectorAll('b')[1]).color), 'rgb(0, 0, 0)');
+    assert.deepEqual(await page.evaluate(() => [...view().querySelectorAll('.gemini-parser-math')].map(math => [math.closest('[dir]')?.getAttribute('dir') || null,
+        math.parentElement.style.display])), [['rtl', ''], [null, 'none']]);
+    assert.equal(await page.evaluate(() => source.innerHTML === originalMarkup), true);
+});
+
+test('boxed native spans retain one box instead of splitting backgrounds, padding or block layout per token', async t => {
+    const page = await fixture(t, { html: '<span style="display:block;padding:6px;background:rgb(20,30,40)">**bold** `code` $x$ tail</span>' });
+    assert.equal(await page.evaluate(() => view().childNodes.length), 1);
+    assert.deepEqual(await page.evaluate(() => [view().firstChild.style.display, view().firstChild.style.padding,
+        view().firstChild.style.backgroundColor, !!view().firstChild.querySelector('b'), !!view().firstChild.querySelector('code'),
+        !!view().firstChild.querySelector('.katex'), source.innerHTML === originalMarkup]), ['block', '6px', 'rgb(20, 30, 40)', true, true, true, true]);
+});
+
 test('renders while the animated streaming footer remains, without replacing source children', async t => {
     const page = await fixture(t);
     assert.deepEqual(await page.evaluate(() => [view().textContent, source.firstChild === originalText,
@@ -171,13 +418,13 @@ test('changing raw content back to plain text restores original display', async 
     assert.equal(await page.evaluate(() => source.innerText), 'plain again');
 });
 
-test('interactive content added during streaming restores live original buttons and handlers', async t => {
+test('interactive content added during streaming stays live beside repaired text', async t => {
     const page = await fixture(t);
     await page.evaluate(() => {
         const button = document.createElement('button'); button.textContent = 'citation';
         window.clicked = 0; button.addEventListener('click', () => clicked++); source.append(button);
     });
-    await page.waitForFunction(() => !view());
+    await page.waitForFunction(() => view()?.querySelector('slot[data-gp-native]'));
     await page.locator('#answer button').click();
     assert.equal(await page.evaluate(() => clicked), 1);
     assert.equal(await page.evaluate(() => source.firstChild === originalText), true);
@@ -313,7 +560,7 @@ test('cell widgets, native formula hosts and unsupported attributes stay native,
     assert.equal(await page.evaluate(async () => {
         const button = document.createElement('button'); button.textContent = 'native action';
         window.cellClicks = 0; button.addEventListener('click', () => cellClicks++); cell.append(button);
-        await new Promise(requestAnimationFrame); return cellView() === null;
+        await new Promise(requestAnimationFrame); return cellView()?.querySelector('b')?.textContent === 'safe' && button.getBoundingClientRect().height > 0;
     }), true);
     await page.locator('td button').filter({ hasText: 'native action' }).click();
     assert.equal(await page.evaluate(() => cellClicks), 1);
@@ -429,7 +676,7 @@ test('manual native passthrough displays new source children while disabled, aft
             if (mode === 'disabled') engine.updateSettings({ enabled: false });
             else if (mode === 'fallback') {
                 engine.updateSettings({ enabled: true });
-                source.append(document.createElement('button'));
+                source.setAttribute('contenteditable', 'true');
             } else engine.destroy();
         }, mode);
         await page.waitForFunction(() => !view());
@@ -746,7 +993,7 @@ test('class changes on ancestors inside the chat refresh copied inline styles', 
         const style = document.createElement('style');style.textContent = '.theme .native{color:rgb(0,80,120)}';document.head.append(style);
         document.querySelector('#response').classList.add('theme');
     });
-    await page.waitForFunction(() => getComputedStyle(view().querySelector('span')).color === 'rgb(0, 80, 120)', null, { timeout: 1000 });
+    await page.waitForFunction(() => view().querySelector('span') && getComputedStyle(view().querySelector('span')).color === 'rgb(0, 80, 120)', null, { timeout: 1000 });
 });
 
 test('prices do not become formulas or swallow following emphasis', async t => {
@@ -781,7 +1028,7 @@ test('new interactive content is shown natively before the next animation frame'
     assert.equal(await page.evaluate(async () => {
         const button = document.createElement('button'); button.textContent = 'source'; source.append(button);
         await new Promise(requestAnimationFrame);
-        return !view() && button.getBoundingClientRect().height > 0;
+        return view()?.querySelector('b')?.textContent === 'alpha' && button.getBoundingClientRect().height > 0;
     }), true);
 });
 
@@ -861,12 +1108,12 @@ test('bundled KaTeX font faces are registered and load successfully', async t =>
     assert.equal(await page.evaluate(() => [...document.fonts].some(font => font.status === 'error')), false);
 });
 
-test('theme changes update copied native inline styles, and new interactive attributes restore native content', async t => {
+test('theme changes update copied native inline styles, and new interactive attributes preserve the live element', async t => {
     const page = await fixture(t, { html: '<span style="font-weight:bold">native</span> **fixed**' });
     await page.evaluate(() => { document.body.style.color = 'rgb(0, 80, 120)'; });
-    await page.waitForFunction(() => getComputedStyle(view().firstChild).color === 'rgb(0, 80, 120)');
+    await page.waitForFunction(() => view().querySelector('span') && getComputedStyle(view().querySelector('span')).color === 'rgb(0, 80, 120)', null, {timeout:1000});
     await page.evaluate(() => { source.firstChild.setAttribute('data-citation-id', 'new-source'); });
-    await page.waitForFunction(() => !view());
+    await page.waitForFunction(() => view()?.querySelector('slot[data-gp-native]'));
     assert.equal(await page.evaluate(() => source.firstChild.getAttribute('data-citation-id')), 'new-source');
 });
 
