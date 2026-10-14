@@ -44,6 +44,7 @@
     }
     function opaqueTree(node, list = false) {
         if (nativeMath(node)) return false;
+        if (node.shadowRoot) return true;
         if (!inertInline(node) && !(list && LIST_TAGS.has(node.tagName))) return true;
         if (node.tagName === 'CODE') return false;
         return [...node.children].some(child => opaqueTree(child, list));
@@ -386,10 +387,10 @@
         return { fragment, changed: transformed || plain !== text };
     }
 
-    function safeBlock(element) {
-        if (!element.matches(BLOCKS) || !element.isConnected || !element.closest('.chat-container') || element.closest(EXCLUDED) || element.isContentEditable) return false;
+    function safeBlock(element, nestedHost = false) {
+        if ((!nestedHost && !element.matches(BLOCKS)) || !element.isConnected || !element.closest('.chat-container') || element.closest(EXCLUDED) || element.isContentEditable) return false;
         if (listHost(element)) return true;
-        if (!element.matches(TEXT_BLOCKS + ',' + MIXED_SPANS)) return false;
+        if (!nestedHost && !element.matches(TEXT_BLOCKS + ',' + MIXED_SPANS)) return false;
         if ([...element.querySelectorAll(TEXT_BLOCKS)].some(block => {
             let child = block;
             while (child.parentElement !== element) child = child.parentElement;
@@ -520,6 +521,7 @@
         const settings = { ...DEFAULTS, ...options.settings };
         const colors = Object.fromEntries(COLOR_KEYS.map(key => [key, options.settings?.[key] ?? null]));
         const roots = new WeakMap();
+        const nestedHosts = new WeakSet();
         const passthrough = new WeakMap();
         const nativeKeys = new WeakMap();
         let nextNativeKey = 0;
@@ -576,6 +578,7 @@
                 try { root = element.attachShadow({ mode: 'open', slotAssignment: 'manual' }); }
                 catch { return null; }
                 roots.set(element, root);
+                if (element.tagName === 'SPAN' && element.matches(MIXED_SPANS) && !element.matches(TEXT_BLOCKS)) nestedHosts.add(element);
             }
             passthrough.get(element)?.disconnect(); passthrough.delete(element);
             const css = styles();
@@ -595,7 +598,7 @@
         }
 
         function process(element) {
-            if (!safeBlock(element)) { restore(element); snapshots.delete(element); return; }
+            if (!safeBlock(element, nestedHosts.has(element))) { restore(element); snapshots.delete(element); return; }
             if (element.shadowRoot && element.shadowRoot !== roots.get(element)) return;
             // Keep native formulas visible until their projection stylesheet is
             // ready; otherwise startup would briefly show unstyled math/text.
@@ -632,13 +635,14 @@
             if (destroyed || !settings.enabled) return;
             counters.flushes++;
             for (const element of active.keys()) {
-                if (!element.matches(BLOCKS) || !element.isConnected || !element.closest('.chat-container')) { restore(element); snapshots.delete(element); }
+                if ((!element.matches(BLOCKS) && !nestedHosts.has(element)) || !element.isConnected || !element.closest('.chat-container')) { restore(element); snapshots.delete(element); }
             }
             if (scan) {
                 containers = new Set(document.querySelectorAll('.chat-container'));
                 containers.forEach(container => {
                     if (container.matches(BLOCKS)) dirty.add(container);
                     container.querySelectorAll(BLOCKS).forEach(element => dirty.add(element));
+                    container.querySelectorAll('span').forEach(element => { if (nestedHosts.has(element)) dirty.add(element); });
                 });
                 scan = false;
             }
@@ -675,7 +679,10 @@
                 const block = target?.closest(BLOCKS);
                 let projectedAncestor = false;
                 for (let parent = target; parent; parent = parent.parentElement) {
-                    if (active.has(parent)) { projectedAncestor = true; break; }
+                    if (active.has(parent)) {
+                        projectedAncestor = true; dirty.add(parent);
+                        if (record.type === 'attributes') snapshots.delete(parent);
+                    }
                 }
                 if (record.type === 'childList') {
                     // A new/replaced host otherwise shows raw content until the

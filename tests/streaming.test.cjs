@@ -120,6 +120,32 @@ test('a widget arriving inside a previously flattened span mounts nested project
     }), true);
 });
 
+test('removing a nested widget preserves repair through subsequent text updates and off/on toggles', async t => {
+    const page = await fixture(t, { html: '**outside** <span><span>**inside** <sources-carousel-inline><button>PNG</button></sources-carousel-inline></span></span>' });
+    await page.evaluate(() => { window.inner = source.querySelector('span span'); source.querySelector('sources-carousel-inline').remove(); });
+    await page.waitForFunction(() => view()?.querySelector('b')?.textContent === 'outside' && inner.shadowRoot?.querySelector('b')?.textContent === 'inside');
+    await page.evaluate(() => { inner.firstChild.data = '**updated** '; });
+    await page.waitForFunction(() => inner.shadowRoot?.querySelector('b')?.textContent === 'updated');
+    await page.evaluate(() => engine.updateSettings({enabled:false}));
+    assert.equal(await page.evaluate(() => !view() && !inner.shadowRoot.querySelector('.gp-view')), true);
+    await page.evaluate(() => engine.updateSettings({enabled:true}));
+    await page.waitForFunction(() => view()?.querySelector('b') && inner.shadowRoot.querySelector('b')?.textContent === 'updated');
+    assert.equal(await page.evaluate(() => source.querySelector('span span') === inner), true);
+});
+
+test('an unrelated existing inline shadow component stays live beside repaired text', async t => {
+    const page = await fixture(t, { settings: {enabled:false}, html: '**outside** <span id="foreign-component"></span>' });
+    await page.evaluate(() => {
+        const component = source.querySelector('span'); window.foreignRoot = component.attachShadow({mode:'open'});
+        foreignRoot.append(Object.assign(document.createElement('button'), {textContent:'native'}));
+        window.foreignCalls=0;foreignRoot.querySelector('button').addEventListener('click',()=>foreignCalls++);
+        engine.updateSettings({enabled:true});
+    });
+    await page.waitForFunction(() => view()?.querySelector('b'));
+    await page.locator('#foreign-component button').click();
+    assert.deepEqual(await page.evaluate(() => [foreignCalls, source.querySelector('span').shadowRoot === foreignRoot, view().querySelector('b').textContent]), [1,true,'outside']);
+});
+
 test('sup/sub/mark and inert sanitizer metadata preserve presentation beside repaired text', async t => {
     const page = await fixture(t, { html: '<span data-sourcepos="1:1-1:12" data-fencelength="2" data-infolength="0">**outside**</span> H<sup>2</sup> O<sub>2</sub> <mark>highlight</mark>' });
     assert.equal(await page.evaluate(() => view().querySelector('b').textContent), 'outside');
