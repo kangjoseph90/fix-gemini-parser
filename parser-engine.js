@@ -8,8 +8,32 @@
     // SPAN: project on that existing node, leaving table layout/copy DOM intact.
     const BLOCKS = 'p,h1,h2,h3,h4,h5,h6,td > span,th > span';
     const INLINE_TAGS = new Set(['SPAN', 'B', 'STRONG', 'I', 'EM', 'S', 'DEL', 'U', 'CODE', 'BR']);
+    // These are live Gemini components, not text to clone or parse. Only direct
+    // host children can be displayed unchanged through a manually assigned slot.
+    const NATIVE_ISLANDS = 'sources-carousel-inline,source-inline-chip,response-element';
+    function neutralSpan(node) {
+        return node.nodeType === 1 && node.tagName === 'SPAN' && [...node.attributes].every(attribute =>
+            ['data-path-to-node', 'data-index-in-node'].includes(attribute.name) || attribute.name.startsWith('_ngcontent-'));
+    }
+    function nativeIsland(node, host) {
+        if (node?.nodeType !== 1 || node.parentElement !== host) return false;
+        if (node.matches(NATIVE_ISLANDS)) return true;
+        // Gemini sometimes wraps an inline response widget in neutral metadata
+        // spans. Slot the existing wrapper only if it contains no other text.
+        function widgetOnly(child) {
+            if (child.nodeType === 8) return true;
+            if (child.nodeType === 3) return !child.textContent.trim();
+            return child.nodeType === 1 && (child.matches(NATIVE_ISLANDS) ||
+                (neutralSpan(child) && [...child.childNodes].every(widgetOnly)));
+        }
+        return neutralSpan(node) && !!node.querySelector(NATIVE_ISLANDS) && [...node.childNodes].every(widgetOnly);
+    }
+    function assignSlot(slot, nodes) {
+        const current = slot.assignedNodes();
+        if (current.length !== nodes.length || current.some((node, index) => node !== nodes[index])) slot.assign(...nodes);
+    }
     const FORMATS = { B: 'bold', STRONG: 'bold', I: 'italic', EM: 'italic', S: 'strike', DEL: 'strike', U: 'underline', CODE: 'code' };
-    const EXCLUDED = 'pre,code,[contenteditable="true"],[contenteditable=""],user-query,.user-query,.query-text,[data-role="user"],.response-footer';
+    const EXCLUDED = 'pre,code,[contenteditable="true"],[contenteditable=""],user-query,.user-query,.query-text,[data-role="user"],.response-footer,' + NATIVE_ISLANDS;
     const INLINE_STYLE = ['color', 'background-color', 'font-family', 'font-size', 'font-weight', 'font-style',
         'line-height', 'letter-spacing', 'text-decoration', 'white-space', 'vertical-align', 'display', 'visibility', 'opacity'];
     const CODE_BOX_STYLE = ['display', 'padding', 'margin', 'border', 'border-radius'];
@@ -265,7 +289,11 @@
 
     function safeBlock(element) {
         if (!element.matches(BLOCKS) || !element.isConnected || !element.closest('.chat-container') || element.closest(EXCLUDED) || element.isContentEditable) return false;
-        if (element.querySelector(BLOCKS)) return false;
+        if ([...element.querySelectorAll(BLOCKS)].some(block => {
+            let child = block;
+            while (child.parentElement !== element) child = child.parentElement;
+            return !nativeIsland(child, element);
+        })) return false;
         function safeInline(child, host = false) {
             if (!INLINE_TAGS.has(child.tagName) || (!host && child.shadowRoot) || child.isContentEditable) return false;
             if ([...child.attributes].some(attribute => !['class', 'style', 'dir', 'lang', 'data-path-to-node', 'data-index-in-node'].includes(attribute.name) &&
@@ -274,16 +302,17 @@
             // expression, never clone its descendants or any interactive widget.
             if (nativeMath(child)) return !child.querySelector('a,button,input,textarea,select,[tabindex],[contenteditable],[role]');
             if (/katex|mathjax|citation|attachment|source-chip/i.test(child.className)) return false;
-            return Array.from(child.children).every(child => safeInline(child));
+            return Array.from(child.children).every(child => nativeIsland(child, element) || safeInline(child));
         }
         // Cell spans may themselves be widgets or native math, unlike paragraph
         // hosts. Apply the inline safety gate to the host's own attributes too.
         if (element.tagName === 'SPAN') return !nativeMath(element) && safeInline(element, true);
-        return Array.from(element.children).every(child => safeInline(child));
+        return Array.from(element.children).every(child => nativeIsland(child, element) || safeInline(child));
     }
 
-    function renderBlock(source, settings, colors, document, katex, markdown) {
+    function renderBlock(source, settings, colors, document, katex, markdown, nativeKey) {
         let changed = false;
+        const islands = [];
         function childrenOf(node) {
             const fragment = document.createDocumentFragment();
             let text = '';
@@ -295,6 +324,12 @@
             function visit(child) {
                 if (child.nodeType === 3) { text += child.nodeValue; return; }
                 if (child.nodeType !== 1) return;
+                if (nativeIsland(child, source)) {
+                    flush();
+                    const key = nativeKey(child);
+                    const slot = document.createElement('slot'); slot.setAttribute('data-gp-native', key);
+                    islands.push({ node: child, key }); fragment.appendChild(slot); return;
+                }
                 if (nativeMath(child)) {
                     flush();
                     // Native formulas stay formatted even with the repair toggle
@@ -315,8 +350,7 @@
                     changed = true; return;
                 }
                 // Gemini can split one token across adjacent Text nodes/spans.
-                if (child.tagName === 'SPAN' && [...child.attributes].every(attribute =>
-                    ['data-path-to-node', 'data-index-in-node'].includes(attribute.name) || attribute.name.startsWith('_ngcontent-'))) {
+                if (neutralSpan(child)) {
                     child.childNodes.forEach(visit); return;
                 }
                 flush();
@@ -344,7 +378,7 @@
             node.childNodes.forEach(visit); flush(); return fragment;
         }
         const fragment = childrenOf(source);
-        return { fragment, changed };
+        return { fragment, changed, islands };
     }
 
     function styleRules(colors, document) {
@@ -366,6 +400,9 @@
         const settings = { ...DEFAULTS, ...options.settings };
         const colors = Object.fromEntries(COLOR_KEYS.map(key => [key, options.settings?.[key] ?? null]));
         const roots = new WeakMap();
+        const passthrough = new WeakMap();
+        const nativeKeys = new WeakMap();
+        let nextNativeKey = 0;
         const snapshots = new WeakMap();
         const active = new Map();
         const dirty = new Set();
@@ -387,8 +424,16 @@
         function restore(element) {
             const root = roots.get(element);
             if (root) {
+                if (passthrough.has(element)) { active.delete(element); return; }
                 root.adoptedStyleSheets = [];
-                root.replaceChildren(document.createElement('slot'));
+                const slot = document.createElement('slot'); root.replaceChildren(slot);
+                const assign = () => assignSlot(slot, [...element.childNodes].filter(node => node.nodeType === 1 || node.nodeType === 3));
+                assign();
+                // Manual roots cannot return to automatic slotting. While off
+                // (or destroyed/fallen back), observe ONLY direct child-list
+                // changes to keep native content visible. No parsing or timers.
+                const observer = new global.MutationObserver(assign);
+                observer.observe(element, { childList: true }); passthrough.set(element, observer);
             }
             active.delete(element);
         }
@@ -407,23 +452,25 @@
             if (!root) {
                 // Never take over another component's shadow root.
                 if (element.shadowRoot) return null;
-                try { root = element.attachShadow({ mode: 'open' }); }
+                if (!global.HTMLSlotElement?.prototype.assign) return null;
+                try { root = element.attachShadow({ mode: 'open', slotAssignment: 'manual' }); }
                 catch { return null; }
                 roots.set(element, root);
             }
+            passthrough.get(element)?.disconnect(); passthrough.delete(element);
             const css = styles();
             const style = sharedSheet ? null : document.createElement('style');
             if (style) style.textContent = css;
             else root.adoptedStyleSheets = [sharedSheet];
             const original = document.createElement('span');
             original.className = 'gp-original'; original.setAttribute('aria-hidden', 'true');
-            original.appendChild(document.createElement('slot'));
+            const originalSlot = document.createElement('slot'); original.appendChild(originalSlot);
             const view = document.createElement('span'); view.className = 'gp-view';
             // The clipped slot keeps light-DOM innerText usable by native copy
             // handlers, but is excluded from selection/accessibility. Only the
             // preview takes space in normal flow. Original children never move.
             root.replaceChildren(...(style ? [style, original, view] : [original, view]));
-            const entry = { root, style, view };
+            const entry = { root, style, view, originalSlot };
             active.set(element, entry); return entry;
         }
 
@@ -438,13 +485,22 @@
             if (previous?.source === snapshot && previous.revision === revision) return;
             snapshots.set(element, { source: snapshot, revision });
             try {
-                const parsed = renderBlock(element, settings, colors, document, katexCss ? options.katex : null, markdown);
+                const parsed = renderBlock(element, settings, colors, document, katexCss ? options.katex : null, markdown, node => {
+                    if (!nativeKeys.has(node)) nativeKeys.set(node, String(++nextNativeKey));
+                    return nativeKeys.get(node);
+                });
                 if (!parsed.changed) { if (active.has(element)) restore(element); return; }
                 const entry = active.get(element) || projection(element);
                 if (!entry) return;
                 const css = styles();
                 if (entry.style && entry.style.textContent !== css) entry.style.textContent = css;
                 if (reconcile(entry.view, parsed.fragment)) counters.renderWrites++;
+                const nativeNodes = new Set(parsed.islands.map(island => island.node));
+                assignSlot(entry.originalSlot, [...element.childNodes].filter(node =>
+                    (node.nodeType === 1 || node.nodeType === 3) && !nativeNodes.has(node)));
+                for (const island of parsed.islands) {
+                    assignSlot(entry.view.querySelector(`slot[data-gp-native="${island.key}"]`), [island.node]);
+                }
             } catch (error) {
                 restore(element);
                 console.warn('[Gemini Parser] Kept native content after rendering error:', error);

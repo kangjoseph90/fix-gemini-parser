@@ -14,11 +14,14 @@ and following blocks follow its actual height without coordinate overlays.
 While enabled, a clipped, non-interactive, `aria-hidden` slot keeps the original
 light DOM available to native text/`innerText` readers. Only the preview is shown
 and exposed to accessibility. Turning off removes the preview/styles, cancels
-queued work, disconnects observers, and displays the original through a plain
+queued work, disconnects parsing observers, and displays the original through a plain
 slot. The browser cannot detach a shadow root once created; the root remains with
 only that slot while disabled. Original nodes, attributes and event handlers
 remain intact. Turning on always scans the current source, including changes
 made while off. Finished and streaming responses use the same renderer.
+Roots use manual slot assignment. A minimal per-host observer watches only direct
+child-list changes during native passthrough (disabled, fallback, or destroyed),
+so new source children remain visible. It performs no parsing or scheduled work.
 
 Text/child/attribute mutations enqueue affected blocks. A fixed 40 ms window
 coalesces updates without waiting for the entire stream to finish. Whole
@@ -62,7 +65,18 @@ query/editor/footer/code regions. Simple native inline formatting is retained.
 Adjacent text nodes and spans carrying only Gemini path/index/Angular metadata
 can form one Markdown token.
 
-Blocks containing attachments, links, citations, unrecognized native math, buttons, unknown
+Direct `sources-carousel-inline`, `source-inline-chip`, and `response-element` children are displayed
+through manually assigned slots at their original positions. Their original
+nodes, attributes, subtrees, handlers, and component lifecycle remain intact;
+surrounding text still receives Markdown/LaTeX repair and configured colors.
+Neutral metadata spans containing only these widgets can also be slotted as a
+unit; spans mixing unsupported widgets with other text retain native fallback.
+Widget content and popups are opaque to the parser. Tokens are not joined
+across a citation. Stable slot assignments are retained across token updates.
+Source text/format wrappers are assigned to the clipped original slot, so citations
+appear once and remain accessible/clickable. No `slot` attributes are written.
+
+Blocks containing attachments, links, unrecognized citations, unrecognized native math, buttons, unknown
 components, or interactive/unknown inline attributes remain entirely native.
 If those arrive during streaming, an existing preview immediately falls back to
 the original slot on the next rendering batch. Recognized inert `span.math-inline`

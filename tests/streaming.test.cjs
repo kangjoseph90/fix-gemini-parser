@@ -342,6 +342,147 @@ test('another component shadow root is never overwritten', async t => {
     assert.equal(await page.evaluate(() => source.shadowRoot.textContent), 'native component');
 });
 
+test('citation components stay live while adjacent broken Markdown, math and native bold receive repair', async t => {
+    const page = await fixture(t, { html: String.raw`<span data-path-to-node="0,0">**fixed** $x^2$ </span><sources-carousel-inline id="citation"><source-inline-chip><button id="chip" aria-haspopup="dialog">PNG</button></source-inline-chip></sources-carousel-inline><span data-path-to-node="0,1"> <b data-path-to-node="0,1">native bold</b> \(y^2\)</span>`,
+        settings: { boldColor: { color: '#ffcc66' } } });
+    await page.evaluate(() => { source.lastChild.lastChild.textContent = ' \\(y^2\\)'; });
+    await page.waitForFunction(() => view()?.querySelectorAll('.katex').length === 2);
+    assert.deepEqual(await page.evaluate(() => {
+        const island = source.querySelector('sources-carousel-inline'); window.citation = island;
+        window.chip = source.querySelector('#chip'); window.chipClicks = 0;
+        chip.addEventListener('click', () => chipClicks++);
+        return [source.firstChild === originalText, island.parentElement === source, island.hasAttribute('slot'),
+            view().querySelector('sources-carousel-inline') === null,
+            view().querySelector('slot[data-gp-native]').assignedNodes()[0] === island,
+            [...view().querySelectorAll('b')].map(b => getComputedStyle(b).color)];
+    }), [true, true, false, true, true, ['rgb(255, 204, 102)', 'rgb(255, 204, 102)']]);
+    await page.locator('#chip').click();
+    assert.equal(await page.evaluate(() => chipClicks), 1);
+    const tree = await page.locator('#answer').ariaSnapshot();
+    assert.match(tree, /button "PNG"/); assert.equal((tree.match(/button "PNG"/g) || []).length, 1);
+    assert.doesNotMatch(tree, /\*\*fixed\*\*/);
+    assert.equal(await page.evaluate(() => source.innerText.includes('**fixed**') &&
+        (source.innerText.match(/PNG/g) || []).length === 1), true);
+});
+
+test('late citations mount before paint without dropping previously repaired text or formula nodes', async t => {
+    const page = await fixture(t, { text: '**steady** $x^2$ ' });
+    assert.deepEqual(await page.evaluate(async () => {
+        const oldView = view(), bold = oldView.querySelector('b'), math = oldView.querySelector('.gemini-parser-math');
+        window.citation = document.createElement('sources-carousel-inline');
+        const button = document.createElement('button'); button.textContent = 'PNG'; citation.append(button); source.append(citation);
+        await new Promise(requestAnimationFrame);
+        return [view() === oldView, view().querySelector('b') === bold,
+            view().querySelector('.gemini-parser-math') === math, citation.parentElement === source,
+            view().querySelector('slot[data-gp-native]').assignedNodes()[0] === citation,
+            button.getBoundingClientRect().height > 0];
+    }), [true, true, true, true, true, true]);
+});
+
+test('citation focus, popup handlers and component lifecycle survive streaming and rapid toggles', async t => {
+    const page = await fixture(t, { html: '**fixed** <sources-carousel-inline><button id="chip">PNG</button><div id="popup" hidden><p>**native popup**</p></div></sources-carousel-inline> tail' });
+    await page.evaluate(() => {
+        window.connections = 0; window.disconnections = 0;
+        customElements.define('sources-carousel-inline', class extends HTMLElement {
+            connectedCallback() { connections++; } disconnectedCallback() { disconnections++; }
+        });
+        window.citation = source.querySelector('sources-carousel-inline'); window.chip = document.getElementById('chip');
+        chip.addEventListener('click', () => document.getElementById('popup').hidden = !document.getElementById('popup').hidden);
+        chip.focus(); source.lastChild.textContent = ' **streamed tail**';
+    });
+    await page.waitForFunction(() => view()?.querySelectorAll('b').length === 2);
+    assert.equal(await page.evaluate(() => document.activeElement === chip), true);
+    await page.locator('#chip').click();
+    await page.waitForFunction(() => !document.getElementById('popup').hidden);
+    assert.deepEqual(await page.evaluate(() => [!!view(), document.querySelector('#popup p').shadowRoot,
+        citation.parentElement === source, connections, disconnections]), [true, null, true, 1, 0]);
+    await page.evaluate(() => {
+        for (let i = 0; i < 15; i++) { engine.updateSettings({ enabled: false }); engine.updateSettings({ enabled: true }); }
+    });
+    await page.locator('#chip').click();
+    assert.deepEqual(await page.evaluate(() => [document.getElementById('popup').hidden,
+        connections, disconnections, view().querySelectorAll('slot[data-gp-native]').length]), [true, 1, 0, 1]);
+});
+
+test('replaced, reordered and removed citation components get the current native slot without stale text', async t => {
+    const page = await fixture(t, { html: '**left** <sources-carousel-inline><button>PNG A</button></sources-carousel-inline> **middle** <source-inline-chip><button>PNG B</button></source-inline-chip> **right**' });
+    assert.equal(await page.locator('#answer').getByRole('button').count(), 2);
+    await page.evaluate(() => {
+        window.oldCitation = source.querySelector('sources-carousel-inline');
+        window.nextCitation = document.createElement('sources-carousel-inline');
+        const button = document.createElement('button'); button.textContent = 'PNG C'; nextCitation.append(button); oldCitation.replaceWith(nextCitation);
+        source.prepend(source.querySelector('source-inline-chip'));
+    });
+    await page.waitForFunction(() => view()?.querySelectorAll('slot[data-gp-native]').length === 2 &&
+        view().querySelectorAll('slot[data-gp-native]')[1].assignedNodes()[0] === nextCitation);
+    assert.deepEqual(await page.locator('#answer').getByRole('button').allTextContents(), ['PNG B', 'PNG C']);
+    await page.evaluate(() => { source.querySelector('source-inline-chip').remove(); nextCitation.remove(); });
+    await page.waitForFunction(() => view()?.querySelectorAll('slot[data-gp-native]').length === 0);
+    assert.equal(await page.locator('#answer').getByRole('button').count(), 0);
+    assert.equal(await page.evaluate(() => view().querySelectorAll('b').length), 3);
+});
+
+test('manual native passthrough displays new source children while disabled, after fallback and after destroy', async t => {
+    const page = await fixture(t);
+    for (const mode of ['disabled', 'fallback', 'destroyed']) {
+        await page.evaluate(mode => {
+            if (mode === 'disabled') engine.updateSettings({ enabled: false });
+            else if (mode === 'fallback') {
+                engine.updateSettings({ enabled: true });
+                source.append(document.createElement('button'));
+            } else engine.destroy();
+        }, mode);
+        await page.waitForFunction(() => !view());
+        await page.evaluate(mode => {
+            const span = document.createElement('span'); span.textContent = mode;
+            const chip = document.createElement('sources-carousel-inline'); chip.textContent = 'PNG';
+            source.replaceChildren(span, chip);
+        }, mode);
+        await page.waitForFunction(() => source.shadowRoot.firstChild.assignedNodes().length === 2);
+        assert.deepEqual(await page.evaluate(() => [source.innerText, source.firstChild.getBoundingClientRect().height > 0]), [mode + 'PNG', true]);
+        if (mode === 'disabled') await page.evaluate(() => { source.textContent = '**alpha**'; });
+    }
+});
+
+test('native citation attributes, text and shadow contents are opaque to parser colors and syntax', async t => {
+    const page = await fixture(t, { html: '**fixed** <sources-carousel-inline style="color:rgb(1,2,3)"><button>**literal** $x$</button></sources-carousel-inline>', settings: { boldColor: { color: '#ffcc66' } } });
+    assert.equal(await page.locator('#answer').getByRole('button', { name: '**literal** $x$', exact: true }).count(), 1);
+    assert.deepEqual(await page.evaluate(() => [view().querySelectorAll('b').length, view().querySelectorAll('.katex').length,
+        getComputedStyle(source.querySelector('sources-carousel-inline')).color, source.innerHTML === originalMarkup]), [1, 0, 'rgb(1, 2, 3)', true]);
+    await page.evaluate(() => {
+        const root = source.querySelector('sources-carousel-inline').attachShadow({ mode: 'open' });
+        const slot = document.createElement('slot'); root.append(slot); window.nativeChipRoot = root;
+        source.firstChild.textContent = '**updated** ';
+    });
+    await page.waitForFunction(() => view()?.querySelector('b')?.textContent === 'updated');
+    assert.equal(await page.evaluate(() => nativeChipRoot.childNodes.length === 1 && nativeChipRoot.firstChild.tagName === 'SLOT'), true);
+});
+
+test('citation slots preserve text wrapping and keep following blocks below the actual height', async t => {
+    const page = await fixture(t, { html: '**' + 'long text '.repeat(10) + '** <sources-carousel-inline><button>PNG + 2</button></sources-carousel-inline> **' + 'more text '.repeat(10) + '**' });
+    const height = await page.locator('#answer').evaluate(p => p.getBoundingClientRect().height);
+    await page.evaluate(() => { document.querySelector('.chat-container').style.width = '220px'; });
+    await page.waitForFunction(height => source.getBoundingClientRect().height > height, height);
+    assert.deepEqual(await page.evaluate(() => [document.querySelector('footer').getBoundingClientRect().top >= source.getBoundingClientRect().bottom,
+        document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+        source.innerHTML === originalMarkup]), [true, true, true]);
+});
+
+test('Gemini metadata-wrapped response widgets remain live beside repaired text and citation chips', async t => {
+    const page = await fixture(t, { html: '<span data-path-to-node="0,0">**fixed** $x^2$</span>' +
+        '<span data-path-to-node="0,1"><span><response-element><a id="widget" href="#source">**widget text**</a><p>**popup content**</p></response-element></span></span>' +
+        '<span data-path-to-node="0,2"> **tail**</span><sources-carousel-inline><button>PNG</button></sources-carousel-inline>' });
+    await page.waitForFunction(() => view()?.querySelector('.katex'));
+    assert.deepEqual(await page.evaluate(() => [view().querySelectorAll('b').length, view().querySelectorAll('slot[data-gp-native]').length,
+        source.innerHTML === originalMarkup, source.querySelector('response-element p').shadowRoot,
+        view().querySelector('slot[data-gp-native]').assignedNodes()[0] === source.children[1]]), [2, 2, true, null, true]);
+    await page.locator('#widget').click();
+    assert.equal(new URL(page.url()).hash, '#source');
+    assert.equal(await page.locator('#answer').getByRole('button', { name: 'PNG', exact: true }).count(), 1);
+    const tree = await page.locator('#answer').ariaSnapshot();
+    assert.match(tree, /link "\*\*widget text\*\*"/); assert.doesNotMatch(tree, /\*\*fixed\*\*/);
+});
+
 test('class-only completion is observed and identical content does not rewrite the view', async t => {
     const page = await fixture(t);
     const before = await page.evaluate(() => engine.diagnostics());

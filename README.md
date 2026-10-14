@@ -23,7 +23,8 @@ Use the **Fix Gemini Parser: Toggle** userscript menu to turn it on or off.
 ## Notes
 
 This repairs inline formatting, not Gemini’s entire Markdown renderer.
-Content with links, citations, interactive elements, or unsupported structures stays native.
+Gemini citation chips stay live while surrounding text is repaired.
+Other links, interactive elements, or unsupported structures stay native.
 
 ## Development
 
