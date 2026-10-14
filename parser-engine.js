@@ -6,10 +6,63 @@
     const COLOR_KEYS = ['boldColor', 'italicColor', 'strikeColor', 'underlineColor', 'codeColor', 'mathColor'];
     // TD/TH cannot host a shadow root. Gemini already wraps cell content in a
     // SPAN: project on that existing node, leaving table layout/copy DOM intact.
-    const BLOCKS = 'p,h1,h2,h3,h4,h5,h6,td > span,th > span';
-    const INLINE_TAGS = new Set(['SPAN', 'B', 'STRONG', 'I', 'EM', 'S', 'DEL', 'U', 'CODE', 'BR']);
+    const TEXT_BLOCKS = 'p,h1,h2,h3,h4,h5,h6,td > span,th > span';
+    // LI cannot host a shadow tree. Project a bare list on its existing supported
+    // parent instead; the original UL/LI/text nodes keep their parents and data.
+    const LIST_HOSTS = ':is(div,section,article,main,blockquote):has(> ul,> ol)';
+    const MIXED_SPANS = 'span:has(sources-carousel-inline,source-inline-chip,response-element,a,button,input,select,textarea,[tabindex])';
+    const BLOCKS = TEXT_BLOCKS + ',' + LIST_HOSTS + ',' + MIXED_SPANS;
+    const INLINE_TAGS = new Set(['SPAN', 'B', 'STRONG', 'I', 'EM', 'S', 'DEL', 'U', 'CODE', 'BR', 'SUP', 'SUB', 'MARK']);
+    const LIST_TAGS = new Set(['UL', 'OL', 'LI']);
+    const INERT_ATTRIBUTES = new Set(['class', 'style', 'dir', 'lang', 'data-path-to-node', 'data-index-in-node',
+        'data-sourcepos', 'data-fencelength', 'data-infolength', 'data-columns', 'data-type']);
+    function listHost(node) {
+        return node.matches(LIST_HOSTS) && [...node.children].some(list => LIST_TAGS.has(list.tagName) &&
+            [...list.children].some(item => item.tagName === 'LI' && !item.querySelector('p')));
+    }
+    function inertInline(node) {
+        return INLINE_TAGS.has(node.tagName) && !node.isContentEditable &&
+            [...node.attributes].every(attribute => INERT_ATTRIBUTES.has(attribute.name) || attribute.name.startsWith('_ngcontent-')) &&
+            !/katex|mathjax|citation|attachment|source-chip/i.test(node.className);
+    }
+    // These are live Gemini components, not text to clone or parse. Only direct
+    // host children can be displayed unchanged through a manually assigned slot.
+    const NATIVE_ISLANDS = 'sources-carousel-inline,source-inline-chip,response-element';
+    function neutralSpan(node) {
+        return node.nodeType === 1 && node.tagName === 'SPAN' && inertInline(node);
+    }
+    function nativeIsland(node, host) {
+        if (node?.nodeType !== 1 || node.parentElement !== host) return false;
+        if (nativeMath(node)) return false;
+        if (listHost(host)) {
+            if (!LIST_TAGS.has(node.tagName)) return true;
+            // A list with controls remains live; text-only lists can be copied
+            // into the preview without touching their original layout nodes.
+            return [...node.children].some(child => opaqueTree(child, true));
+        }
+        return opaqueTree(node);
+    }
+    function opaqueTree(node, list = false) {
+        if (nativeMath(node)) return false;
+        if (node.shadowRoot) return true;
+        if (!inertInline(node) && !(list && LIST_TAGS.has(node.tagName))) return true;
+        if (node.tagName === 'CODE') return false;
+        return [...node.children].some(child => opaqueTree(child, list));
+    }
+    function assignSlot(slot, nodes) {
+        const current = slot.assignedNodes();
+        if (current.length !== nodes.length || current.some((node, index) => node !== nodes[index])) slot.assign(...nodes);
+    }
+    function present(node, presentation, document) {
+        if (!presentation || (!Object.keys(presentation.style).length && !presentation.dir && !presentation.lang)) return node;
+        const span = document.createElement('span');
+        for (const [property, value] of Object.entries(presentation.style)) span.style.setProperty(property, value);
+        if (presentation.dir) span.setAttribute('dir', presentation.dir);
+        if (presentation.lang) span.setAttribute('lang', presentation.lang);
+        span.appendChild(node); return span;
+    }
     const FORMATS = { B: 'bold', STRONG: 'bold', I: 'italic', EM: 'italic', S: 'strike', DEL: 'strike', U: 'underline', CODE: 'code' };
-    const EXCLUDED = 'pre,code,[contenteditable="true"],[contenteditable=""],user-query,.user-query,.query-text,[data-role="user"],.response-footer';
+    const EXCLUDED = 'pre,code,[contenteditable="true"],[contenteditable=""],user-query,.user-query,.query-text,[data-role="user"],.response-footer,' + NATIVE_ISLANDS;
     const INLINE_STYLE = ['color', 'background-color', 'font-family', 'font-size', 'font-weight', 'font-style',
         'line-height', 'letter-spacing', 'text-decoration', 'white-space', 'vertical-align', 'display', 'visibility', 'opacity'];
     const CODE_BOX_STYLE = ['display', 'padding', 'margin', 'border', 'border-radius'];
@@ -29,6 +82,9 @@
                 var(--gem-sys-color--surface-container, color-mix(in srgb, currentColor 12%, transparent)));
         }
         .gemini-parser-math .katex { font-size: 1.1em; }
+        /* Keep MathML for assistive technology, but select the visible formula
+           once instead of copying both KaTeX representations. */
+        .katex-mathml { user-select: none; }
     `;
 
     function runLength(text, index, character) {
@@ -88,7 +144,8 @@
     }
 
     function nativeMath(element) {
-        return element.tagName === 'SPAN' && element.classList.contains('math-inline') && element.hasAttribute('data-math');
+        return element.hasAttribute('data-math') && (element.matches('span.math-inline,span.math-block,math-inline,math-block')) &&
+            !element.querySelector('a,button,input,textarea,select,[tabindex],[contenteditable],[role]');
     }
 
     function mathView(expression, displayMode, document, katex) {
@@ -141,6 +198,19 @@
         // The input is already DOM text; decoding entities again changes literal
         // examples such as &copy; that Gemini has already escaped for display.
         const markdown = markdownit({ html: false, linkify: false }).disable(['link', 'image', 'autolink', 'entity']);
+        // The stock join rules discard ranges when empty delimiter fragments
+        // are removed. Keep separate text tokens so CSS cannot bleed across a
+        // native span boundary; retain the level bookkeeping used by nesting.
+        markdown.inline.ruler2.at('fragments_join', state => {
+            let level = 0;
+            state.tokens = state.tokens.filter(token => {
+                if (token.nesting < 0) level--;
+                token.level = level;
+                if (token.nesting > 0) level++;
+                return token.type !== 'text' || !!token.content;
+            });
+        });
+        markdown.core.ruler.disable('text_join');
         markdown.inline.ruler.at('text', (state, silent) => {
             let end = state.pos;
             while (end < state.posMax && !/[\n\\`*_[\]!<&~$]/.test(state.src[end])) end++;
@@ -187,7 +257,7 @@
                 // Price text must not be paired with the next price's dollar.
                 // Do not search beyond an invalid close into a later formula.
                 if (end >= 0 && (/\s/.test(state.src[end - 1]) || /\d/.test(state.src[end + 1] || ''))) return false;
-                if (end < 0 && /^\d+(?:[.,]\d+)*(?=\s|[\uac00-\ud7af;,:.!?)]|$)/.test(state.src.slice(state.pos + 1)) &&
+                if (end < 0 && /^\d+(?:[.,]\d+)*(?:\/[\p{L}]+)?(?=\s|[\uac00-\ud7af;,:.!?)]|$)/u.test(state.src.slice(state.pos + 1)) &&
                     !/[\\^_=+{}]/.test(state.src.slice(state.pos + 1))) return false;
             }
             if (!state.env.settings.latex && closing(state.src, state.pos + length, '$'.repeat(length)) < 0) return false;
@@ -218,19 +288,69 @@
             if (!state.src.startsWith('<u>', state.pos) || silent || !state.env.settings.underline) return false;
             return opaque(state, 'gp_underline', '<u>', '</u>');
         });
+        // Record source ranges before delimiter balancing rewrites emphasis
+        // tokens. Presentation spans may split a delimiter; their CSS/dir must
+        // follow the text without becoming a tokenizer boundary.
+        for (const rule of markdown.inline.ruler.__rules__) {
+            const original = rule.fn;
+            rule.fn = (state, silent) => {
+                const start = state.pos, length = state.tokens.length;
+                const pending = state.pending, pendingStart = state.env.gpPendingStart ?? start;
+                const accepted = original(state, silent);
+                if (!accepted || silent) return accepted;
+                const added = state.tokens.slice(length);
+                let index = 0;
+                if (pending && added[0]?.type === 'text' && added[0].content === pending) {
+                    added[0].meta = { ...added[0].meta, gpStart: pendingStart, gpEnd: start }; index++;
+                }
+                for (; index < added.length; index++) {
+                    added[index].meta = { ...added[index].meta, gpStart: start, gpEnd: state.pos };
+                }
+                if (state.pending) state.env.gpPendingStart = added.length || !pending ? start : pendingStart;
+                else state.env.gpPendingStart = state.pos;
+                return accepted;
+            };
+        }
         return markdown;
     }
 
-    function parseText(text, options, document, katex, markdown, depth = 0) {
+    function parseText(text, options, document, katex, markdown, depth = 0, presentations = []) {
         const fragment = document.createDocumentFragment();
         if (depth > 24 || !['bold', 'italic', 'strike', 'underline', 'code', 'latex'].some(key => options[key])) {
             appendLiteral(fragment, text, document); return { fragment, changed: false };
         }
         const tokens = markdown.parseInline(text, { settings: options })[0].children;
         const stack = [fragment];
+        const formatStack = [];
         let plain = '';
         let transformed = false;
-        function literal(value) { appendLiteral(stack.at(-1), value, document); plain += value; }
+        let cursor = 0;
+        function literal(value, token) {
+            const start = token?.meta?.gpStart ?? cursor;
+            const end = token?.meta?.gpEnd ?? start + value.length;
+            const exact = text.slice(start, end) === value;
+            let offset = 0;
+            while (offset < value.length) {
+                const position = exact ? start + offset : start;
+                const presentation = presentations.find(run => position >= run.start && position < run.end);
+                const length = exact ? Math.min(value.length - offset, (presentation?.end ??
+                    presentations.find(run => run.start > position)?.start ?? end) - position) : value.length;
+                let parent = stack.at(-1);
+                if (presentation && (Object.keys(presentation.style).length || presentation.dir || presentation.lang)) {
+                    const span = document.createElement('span');
+                    for (const [property, value] of Object.entries(presentation.style)) span.style.setProperty(property, value);
+                    if (presentation.dir) span.setAttribute('dir', presentation.dir);
+                    if (presentation.lang) span.setAttribute('lang', presentation.lang);
+                    // Configured format colors also apply to presentation runs
+                    // whose native color otherwise overrides inherited bold.
+                    for (const type of formatStack) span.classList.add(`gemini-parser-${type}`);
+                    parent.appendChild(span); parent = span;
+                }
+                appendLiteral(parent, value.slice(offset, offset + Math.max(1, length)), document);
+                offset += Math.max(1, length);
+            }
+            cursor = end; plain += value;
+        }
         for (const token of tokens) {
             const type = { strong: 'bold', em: 'italic', s: 'strike' }[token.type.replace(/_(open|close)$/, '')];
             if (type && token.nesting) {
@@ -238,75 +358,94 @@
                     if (options[type]) {
                         const wrapper = document.createElement({ bold: 'b', italic: 'i', strike: 's' }[type]);
                         wrapper.className = `gemini-parser-${type}`;
-                        stack.at(-1).appendChild(wrapper); stack.push(wrapper); transformed = true;
-                    } else { literal(token.markup); stack.push(stack.at(-1)); }
+                        stack.at(-1).appendChild(wrapper); stack.push(wrapper); formatStack.push(type); transformed = true;
+                    } else { literal(token.markup, token); stack.push(stack.at(-1)); }
                 } else {
-                    stack.pop(); if (!options[type]) literal(token.markup);
+                    stack.pop(); if (options[type]) formatStack.pop(); else literal(token.markup, token);
                 }
+                cursor = token.meta?.gpEnd ?? cursor + token.markup.length;
             } else if (token.type === 'code_inline') {
                 if (!options.code) { literal(token.meta.raw); continue; }
                 const code = document.createElement('code'); code.className = 'gemini-parser-code'; code.textContent = token.content;
-                stack.at(-1).appendChild(code); plain += token.content; transformed = true;
+                stack.at(-1).appendChild(present(code, presentations.find(run => token.meta.gpStart >= run.start && token.meta.gpStart < run.end), document));
+                plain += token.content; transformed = true;
             } else if (token.type === 'gp_math') {
                 if (!options.latex || !katex || !token.content) { literal(token.meta.raw); continue; }
                 try {
                     const math = mathView(token.content, token.markup === '$$' || token.markup === '\\[', document, katex);
-                    stack.at(-1).appendChild(math); transformed = true;
+                    stack.at(-1).appendChild(present(math, presentations.find(run => token.meta.gpStart >= run.start && token.meta.gpStart < run.end), document));
+                    transformed = true;
                 } catch { literal(token.meta.raw); }
             } else if (token.type === 'gp_underline') {
                 const nested = parseText(token.content, options, document, katex, markdown, depth + 1);
                 const underline = document.createElement('u'); underline.className = 'gemini-parser-underline';
                 underline.appendChild(nested.fragment); stack.at(-1).appendChild(underline); transformed = true;
             } else if (token.type === 'softbreak' || token.type === 'hardbreak') literal('\n');
-            else literal(token.content);
+            else literal(token.content, token);
+            if (token.meta?.gpEnd !== undefined) cursor = token.meta.gpEnd;
         }
         return { fragment, changed: transformed || plain !== text };
     }
 
-    function safeBlock(element) {
-        if (!element.matches(BLOCKS) || !element.isConnected || !element.closest('.chat-container') || element.closest(EXCLUDED) || element.isContentEditable) return false;
-        if (element.querySelector(BLOCKS)) return false;
+    function safeBlock(element, nestedHost = false) {
+        if ((!nestedHost && !element.matches(BLOCKS)) || !element.isConnected || !element.closest('.chat-container') || element.closest(EXCLUDED) || element.isContentEditable) return false;
+        if (listHost(element)) return true;
+        if (!nestedHost && !element.matches(TEXT_BLOCKS + ',' + MIXED_SPANS)) return false;
+        if ([...element.querySelectorAll(TEXT_BLOCKS)].some(block => {
+            let child = block;
+            while (child.parentElement !== element) child = child.parentElement;
+            return !nativeIsland(child, element);
+        })) return false;
         function safeInline(child, host = false) {
-            if (!INLINE_TAGS.has(child.tagName) || (!host && child.shadowRoot) || child.isContentEditable) return false;
-            if ([...child.attributes].some(attribute => !['class', 'style', 'dir', 'lang', 'data-path-to-node', 'data-index-in-node'].includes(attribute.name) &&
-                !attribute.name.startsWith('_ngcontent-') && !(nativeMath(child) && attribute.name === 'data-math'))) return false;
             // Gemini's finished formula is an atomic text presentation. Read its
             // expression, never clone its descendants or any interactive widget.
             if (nativeMath(child)) return !child.querySelector('a,button,input,textarea,select,[tabindex],[contenteditable],[role]');
-            if (/katex|mathjax|citation|attachment|source-chip/i.test(child.className)) return false;
-            return Array.from(child.children).every(child => safeInline(child));
+            if (!inertInline(child) || (!host && child.shadowRoot)) return false;
+            return Array.from(child.children).every(child => nativeIsland(child, element) || safeInline(child));
         }
         // Cell spans may themselves be widgets or native math, unlike paragraph
         // hosts. Apply the inline safety gate to the host's own attributes too.
         if (element.tagName === 'SPAN') return !nativeMath(element) && safeInline(element, true);
-        return Array.from(element.children).every(child => safeInline(child));
+        return Array.from(element.children).every(child => nativeIsland(child, element) || safeInline(child));
     }
 
-    function renderBlock(source, settings, colors, document, katex, markdown) {
+    function renderBlock(source, settings, colors, document, katex, markdown, nativeKey) {
         let changed = false;
+        const islands = [];
         function childrenOf(node) {
             const fragment = document.createDocumentFragment();
             let text = '';
+            let presentations = [];
+            const baseline = global.getComputedStyle(source);
             function flush() {
                 if (!text) return;
-                const parsed = parseText(text, settings, document, katex, markdown);
-                fragment.appendChild(parsed.fragment); changed ||= parsed.changed; text = '';
+                const parsed = parseText(text, settings, document, katex, markdown, 0, presentations);
+                fragment.appendChild(parsed.fragment); changed ||= parsed.changed; text = ''; presentations = [];
             }
-            function visit(child) {
-                if (child.nodeType === 3) { text += child.nodeValue; return; }
+            function visit(child, presentation) {
+                if (child.nodeType === 3) {
+                    if (presentation) presentations.push({ ...presentation, start: text.length, end: text.length + child.length });
+                    text += child.nodeValue; return;
+                }
                 if (child.nodeType !== 1) return;
+                if (nativeIsland(child, source)) {
+                    flush();
+                    const key = nativeKey(child);
+                    const slot = document.createElement('slot'); slot.setAttribute('data-gp-native', key);
+                    islands.push({ node: child, key }); fragment.appendChild(slot); return;
+                }
                 if (nativeMath(child)) {
                     flush();
                     // Native formulas stay formatted even with the repair toggle
                     // off, just as native <b>/<code> formatting does.
                     try {
-                        const math = mathView(child.getAttribute('data-math'), !!child.querySelector('.katex-display'), document, katex);
+                        const math = mathView(child.getAttribute('data-math'), child.matches('.math-block,math-block') || !!child.querySelector('.katex-display'), document, katex);
                         const computed = global.getComputedStyle(child);
                         for (const [property, baseline] of [['display', 'inline'], ['visibility', 'visible'], ['opacity', '1']]) {
                             const value = computed.getPropertyValue(property);
                             if (property === 'display' ? value === 'none' : value !== baseline) math.style.setProperty(property, value);
                         }
-                        fragment.appendChild(math);
+                        fragment.appendChild(present(math, presentation, document));
                     } catch {
                         // A malformed final formula must not reset the rest of
                         // the paragraph or repeatedly switch display ownership.
@@ -315,9 +454,21 @@
                     changed = true; return;
                 }
                 // Gemini can split one token across adjacent Text nodes/spans.
-                if (child.tagName === 'SPAN' && [...child.attributes].every(attribute =>
-                    ['data-path-to-node', 'data-index-in-node'].includes(attribute.name) || attribute.name.startsWith('_ngcontent-'))) {
-                    child.childNodes.forEach(visit); return;
+                const computedSpan = neutralSpan(child) ? global.getComputedStyle(child) : null;
+                const textPresentation = computedSpan && computedSpan.display === 'inline' && computedSpan.opacity === '1' &&
+                    computedSpan.backgroundColor === 'rgba(0, 0, 0, 0)' &&
+                    ['padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'margin-top', 'margin-right',
+                        'margin-bottom', 'margin-left', 'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width']
+                        .every(property => computedSpan.getPropertyValue(property) === '0px');
+                if (textPresentation) {
+                    const computed = computedSpan;
+                    const style = {};
+                    for (const property of INLINE_STYLE) {
+                        const value = computed.getPropertyValue(property);
+                        if (value !== baseline.getPropertyValue(property) && !(property === 'display' && value === 'inline')) style[property] = value;
+                    }
+                    const run = { style, dir: child.getAttribute('dir') || presentation?.dir, lang: child.getAttribute('lang') || presentation?.lang };
+                    child.childNodes.forEach(node => visit(node, run)); return;
                 }
                 flush();
                 const type = FORMATS[child.tagName];
@@ -328,23 +479,27 @@
                 if (!finalizedFormat) {
                     const computed = global.getComputedStyle(child);
                     INLINE_STYLE.forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
-                    if (child.tagName === 'CODE') CODE_BOX_STYLE.forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
+                    if (child.tagName === 'CODE' || child.tagName === 'SPAN') CODE_BOX_STYLE.forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
+                    if (LIST_TAGS.has(child.tagName)) ['margin', 'padding', 'list-style-type', 'list-style-position'].forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
                 }
                 // Completed Gemini tokens use our streaming presentation too;
                 // adopting native computed fonts here causes a visible final jump.
                 ['dir', 'lang'].forEach(name => { if (child.hasAttribute(name)) copy.setAttribute(name, child.getAttribute(name)); });
+                if (LIST_TAGS.has(child.tagName)) ['start', 'reversed', 'type', 'value'].forEach(name => {
+                    if (child.hasAttribute(name)) copy.setAttribute(name, child.getAttribute(name));
+                });
                 if (type && settings[type]) {
                     copy.classList.add(`gemini-parser-${type}`);
                     changed = true;
                 }
                 if (child.tagName === 'CODE') copy.textContent = child.textContent;
                 else copy.appendChild(childrenOf(child));
-                fragment.appendChild(copy);
+                fragment.appendChild(present(copy, presentation, document));
             }
-            node.childNodes.forEach(visit); flush(); return fragment;
+            node.childNodes.forEach(child => visit(child)); flush(); return fragment;
         }
         const fragment = childrenOf(source);
-        return { fragment, changed };
+        return { fragment, changed, islands };
     }
 
     function styleRules(colors, document) {
@@ -366,6 +521,10 @@
         const settings = { ...DEFAULTS, ...options.settings };
         const colors = Object.fromEntries(COLOR_KEYS.map(key => [key, options.settings?.[key] ?? null]));
         const roots = new WeakMap();
+        const nestedHosts = new WeakSet();
+        const passthrough = new WeakMap();
+        const nativeKeys = new WeakMap();
+        let nextNativeKey = 0;
         const snapshots = new WeakMap();
         const active = new Map();
         const dirty = new Set();
@@ -387,8 +546,16 @@
         function restore(element) {
             const root = roots.get(element);
             if (root) {
+                if (passthrough.has(element)) { active.delete(element); return; }
                 root.adoptedStyleSheets = [];
-                root.replaceChildren(document.createElement('slot'));
+                const slot = document.createElement('slot'); root.replaceChildren(slot);
+                const assign = () => assignSlot(slot, [...element.childNodes].filter(node => node.nodeType === 1 || node.nodeType === 3));
+                assign();
+                // Manual roots cannot return to automatic slotting. While off
+                // (or destroyed/fallen back), observe ONLY direct child-list
+                // changes to keep native content visible. No parsing or timers.
+                const observer = new global.MutationObserver(assign);
+                observer.observe(element, { childList: true }); passthrough.set(element, observer);
             }
             active.delete(element);
         }
@@ -407,44 +574,56 @@
             if (!root) {
                 // Never take over another component's shadow root.
                 if (element.shadowRoot) return null;
-                try { root = element.attachShadow({ mode: 'open' }); }
+                if (!global.HTMLSlotElement?.prototype.assign) return null;
+                try { root = element.attachShadow({ mode: 'open', slotAssignment: 'manual' }); }
                 catch { return null; }
                 roots.set(element, root);
+                if (element.tagName === 'SPAN' && element.matches(MIXED_SPANS) && !element.matches(TEXT_BLOCKS)) nestedHosts.add(element);
             }
+            passthrough.get(element)?.disconnect(); passthrough.delete(element);
             const css = styles();
             const style = sharedSheet ? null : document.createElement('style');
             if (style) style.textContent = css;
             else root.adoptedStyleSheets = [sharedSheet];
             const original = document.createElement('span');
             original.className = 'gp-original'; original.setAttribute('aria-hidden', 'true');
-            original.appendChild(document.createElement('slot'));
+            const originalSlot = document.createElement('slot'); original.appendChild(originalSlot);
             const view = document.createElement('span'); view.className = 'gp-view';
             // The clipped slot keeps light-DOM innerText usable by native copy
             // handlers, but is excluded from selection/accessibility. Only the
             // preview takes space in normal flow. Original children never move.
             root.replaceChildren(...(style ? [style, original, view] : [original, view]));
-            const entry = { root, style, view };
+            const entry = { root, style, view, originalSlot };
             active.set(element, entry); return entry;
         }
 
         function process(element) {
-            if (!safeBlock(element)) { restore(element); snapshots.delete(element); return; }
+            if (!safeBlock(element, nestedHosts.has(element))) { restore(element); snapshots.delete(element); return; }
             if (element.shadowRoot && element.shadowRoot !== roots.get(element)) return;
             // Keep native formulas visible until their projection stylesheet is
             // ready; otherwise startup would briefly show unstyled math/text.
-            if (!katexCss && element.querySelector('.math-inline[data-math]')) { restore(element); snapshots.delete(element); return; }
+            if (!katexCss && element.querySelector('.math-inline[data-math],.math-block[data-math],math-inline[data-math],math-block[data-math]')) { restore(element); snapshots.delete(element); return; }
             const snapshot = element.innerHTML; // Read only; excludes the shadow tree.
             const previous = snapshots.get(element);
             if (previous?.source === snapshot && previous.revision === revision) return;
             snapshots.set(element, { source: snapshot, revision });
             try {
-                const parsed = renderBlock(element, settings, colors, document, katexCss ? options.katex : null, markdown);
+                const parsed = renderBlock(element, settings, colors, document, katexCss ? options.katex : null, markdown, node => {
+                    if (!nativeKeys.has(node)) nativeKeys.set(node, String(++nextNativeKey));
+                    return nativeKeys.get(node);
+                });
                 if (!parsed.changed) { if (active.has(element)) restore(element); return; }
                 const entry = active.get(element) || projection(element);
                 if (!entry) return;
                 const css = styles();
                 if (entry.style && entry.style.textContent !== css) entry.style.textContent = css;
                 if (reconcile(entry.view, parsed.fragment)) counters.renderWrites++;
+                const nativeNodes = new Set(parsed.islands.map(island => island.node));
+                assignSlot(entry.originalSlot, [...element.childNodes].filter(node =>
+                    (node.nodeType === 1 || node.nodeType === 3) && !nativeNodes.has(node)));
+                for (const island of parsed.islands) {
+                    assignSlot(entry.view.querySelector(`slot[data-gp-native="${island.key}"]`), [island.node]);
+                }
             } catch (error) {
                 restore(element);
                 console.warn('[Gemini Parser] Kept native content after rendering error:', error);
@@ -456,15 +635,21 @@
             if (destroyed || !settings.enabled) return;
             counters.flushes++;
             for (const element of active.keys()) {
-                if (!element.matches(BLOCKS) || !element.isConnected || !element.closest('.chat-container')) { restore(element); snapshots.delete(element); }
+                if ((!element.matches(BLOCKS) && !nestedHosts.has(element)) || !element.isConnected || !element.closest('.chat-container')) { restore(element); snapshots.delete(element); }
             }
             if (scan) {
                 containers = new Set(document.querySelectorAll('.chat-container'));
-                containers.forEach(container => container.querySelectorAll(BLOCKS).forEach(element => dirty.add(element)));
+                containers.forEach(container => {
+                    if (container.matches(BLOCKS)) dirty.add(container);
+                    container.querySelectorAll(BLOCKS).forEach(element => dirty.add(element));
+                    container.querySelectorAll('span').forEach(element => { if (nestedHosts.has(element)) dirty.add(element); });
+                });
                 scan = false;
             }
             const batch = [...dirty]; dirty.clear();
-            batch.forEach(process);
+            // Inner mixed spans render first, then their original hosts are
+            // slotted through outer projections. No native node is reparented.
+            batch.sort((a, b) => a.contains(b) ? 1 : b.contains(a) ? -1 : 0).forEach(process);
         }
 
         function schedule(fullScan = false) {
@@ -484,19 +669,35 @@
             let structuralChange = false;
             for (const record of records) {
                 const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+                if (target === fontStyle || target === disclaimerStyle ||
+                    (record.type === 'childList' && [...record.addedNodes, ...record.removedNodes].length &&
+                        [...record.addedNodes, ...record.removedNodes].every(node => node === fontStyle || node === disclaimerStyle))) continue;
+                if (target?.closest('head') && (target.matches('style,link') ||
+                    [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1 && node.matches('style,link')))) {
+                    revision++; fullScan = true;
+                }
                 const block = target?.closest(BLOCKS);
+                let projectedAncestor = false;
+                for (let parent = target; parent; parent = parent.parentElement) {
+                    if (active.has(parent)) {
+                        projectedAncestor = true; dirty.add(parent);
+                        if (record.type === 'attributes') snapshots.delete(parent);
+                    }
+                }
                 if (record.type === 'childList') {
                     // A new/replaced host otherwise shows raw content until the
                     // 40 ms token timer fires. Mount it in this microtask, before
                     // the next paint. Plain Text updates still use coalescing.
-                    if (block && active.has(block) && [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1)) structuralChange = true;
+                    if (projectedAncestor && [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1)) structuralChange = true;
                     if (Array.from(record.addedNodes).some(node => node.nodeType === 1 &&
                         (node.matches(BLOCKS) || node.querySelector(BLOCKS)) &&
                         (target?.closest('.chat-container') || node.matches('.chat-container') || node.querySelector('.chat-container')))) structuralChange = true;
                 }
                 if (block && (block.closest('.chat-container') || active.has(block))) {
-                    dirty.add(block);
-                    if (record.type === 'attributes') snapshots.delete(block);
+                    for (let parent = block; parent?.closest('.chat-container'); parent = parent.parentElement?.closest(BLOCKS)) {
+                        dirty.add(parent);
+                        if (record.type === 'attributes') snapshots.delete(parent);
+                    }
                 } else if (record.type === 'childList' || target?.closest('.chat-container') || containers.has(target)) fullScan = true;
                 // Inline styles copied into the preview must follow ancestor
                 // theme changes too, even though the source HTML is unchanged.
@@ -512,11 +713,123 @@
             }
         });
 
+        function copyProjection(event) {
+            if (!event.clipboardData || event.target?.closest?.('button,input,textarea,[contenteditable]')) return;
+            const selection = document.getSelection();
+            if (!selection?.rangeCount) return;
+            const ownedRoots = [...active.values()].map(entry => entry.root);
+            const ranges = selection.getComposedRanges?.({ shadowRoots: ownedRoots });
+            const selected = ranges?.[0] || selection.getRangeAt(0);
+            if (selected.collapsed) return;
+            const inProjection = node => ownedRoots.includes(node.getRootNode());
+            if (!inProjection(selected.startContainer) && !inProjection(selected.endContainer)) {
+                // A cross-paragraph range may begin/end in native text while
+                // including projections in between. A collapsed native range
+                // is not enough evidence to intercept an ordinary copy.
+                try {
+                    const nativeRange = document.createRange();
+                    nativeRange.setStart(selected.startContainer, selected.startOffset);
+                    nativeRange.setEnd(selected.endContainer, selected.endOffset);
+                    if (nativeRange.collapsed || ![...active.values()].some(entry =>
+                        entry.originalSlot.assignedNodes().some(node => nativeRange.intersectsNode(node)))) return;
+                } catch { return; }
+            }
+            const lightNode = node => {
+                let element = node.nodeType === 1 ? node : node.parentElement || node.host;
+                while (element?.getRootNode()?.host) element = element.getRootNode().host;
+                return element;
+            };
+            const startHost = lightNode(selected.startContainer), endHost = lightNode(selected.endContainer);
+            const chat = startHost?.closest('.chat-container');
+            if (!chat || !chat.contains(endHost)) return;
+            let scope = startHost;
+            while (!scope.contains(endHost)) scope = scope.parentElement;
+            const mapping = new WeakMap();
+            function clone(node) {
+                if (node.nodeType === 3) {
+                    const copy = node.cloneNode(); mapping.set(node, { copy }); return copy;
+                }
+                if (node.nodeType !== 1 || node.matches('.gp-original,.katex-mathml,script,style')) return null;
+                if (node.tagName === 'SLOT') {
+                    const fragment = document.createDocumentFragment();
+                    const assigned = node.assignedNodes({ flatten: true });
+                    (assigned.length ? assigned : [...node.childNodes]).forEach(child => { const copy = clone(child); if (copy) fragment.append(copy); });
+                    return fragment;
+                }
+                const computed = global.getComputedStyle(node);
+                if (computed.display === 'none' || computed.visibility === 'hidden') return null;
+                const copy = document.createElementNS(node.namespaceURI, node.tagName.toLowerCase());
+                for (const attribute of node.attributes) {
+                    if (!/^on/i.test(attribute.name) && !['id', 'slot'].includes(attribute.name) && !attribute.name.startsWith('data-gp-')) copy.setAttribute(attribute.name, attribute.value);
+                }
+                // Clipboard HTML has no access to our shadow stylesheet.
+                if (node.matches('[class*="gemini-parser-"],.katex,.katex *')) {
+                    INLINE_STYLE.forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
+                    if (node.matches('.gemini-parser-code')) CODE_BOX_STYLE.forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
+                    if (node.matches('.katex *')) ['position', 'top', 'right', 'bottom', 'left', 'width', 'height', 'margin', 'padding', 'transform']
+                        .forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
+                }
+                const entry = active.get(node);
+                const children = [...(entry ? entry.view.childNodes : node.childNodes)];
+                const offsets = [0];
+                children.forEach(child => { const next = clone(child); if (next) copy.append(next); offsets.push(copy.childNodes.length); });
+                mapping.set(node, { copy, offsets });
+                if (entry) {
+                    mapping.set(entry.view, { copy, offsets });
+                    mapping.set(entry.root, { copy, offsets: [0, 0, copy.childNodes.length] });
+                }
+                return copy;
+            }
+            try {
+                clone(scope);
+                const start = mapping.get(selected.startContainer), end = mapping.get(selected.endContainer);
+                if (!start || !end) return;
+                const range = document.createRange();
+                range.setStart(start.copy, start.offsets?.[selected.startOffset] ?? Math.min(selected.startOffset, start.copy.length));
+                range.setEnd(end.copy, end.offsets?.[selected.endOffset] ?? Math.min(selected.endOffset, end.copy.length));
+                if (range.collapsed) return;
+                let content = range.cloneContents();
+                // cloneContents drops the common ancestor (e.g. selecting part
+                // of one bold text node). Carry its inline formatting into HTML.
+                let ancestor = range.commonAncestorContainer;
+                if (ancestor.nodeType === 3) ancestor = ancestor.parentElement;
+                while (ancestor?.matches('b,strong,i,em,s,del,u,code,span,sup,sub,mark,a')) {
+                    const wrapper = ancestor.cloneNode(false); wrapper.append(content); content = wrapper;
+                    ancestor = ancestor.parentElement;
+                }
+                const container = document.createElement('div'); container.append(content);
+                if (!container.childNodes.length) return;
+                function plainText(node) {
+                    if (node.nodeType === 3) return node.data;
+                    if (node.nodeType !== 1 && node.nodeType !== 11) return '';
+                    if (node.nodeType === 1 && node.tagName === 'BR') return '\n';
+                    const text = [...node.childNodes].map(plainText).join('');
+                    return node.nodeType === 1 && /^(P|DIV|H[1-6]|LI|UL|OL|TR)$/.test(node.tagName) ? '\n' + text + '\n' : text;
+                }
+                event.clipboardData.setData('text/html', container.innerHTML);
+                // Chromium's Selection.toString() can stop at the first shadow
+                // paragraph. Serialize the same reconstructed interval as HTML.
+                event.clipboardData.setData('text/plain', plainText(container).replace(/\n{3,}/g, '\n\n').trim());
+                event.preventDefault(); event.stopImmediatePropagation();
+            } catch {
+                // Selection can disappear during a streaming rewrite. Leave the
+                // native/default copy path in control if reconstruction fails.
+            }
+        }
+        function presentationChanged(event) {
+            if (event?.type === 'load' && !event.target.matches?.('link[rel="stylesheet"]')) return;
+            revision++; schedule(true);
+        }
+
         function start() {
             if (destroyed || !settings.enabled || observing) return;
             observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
+            observer.observe(document.head, { childList: true, subtree: true, characterData: true, attributes: true });
             observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style'] });
             observing = true;
+            document.addEventListener('copy', copyProjection, true);
+            document.addEventListener('load', presentationChanged, true);
+            global.addEventListener('resize', presentationChanged);
             disclaimerStyle = document.createElement('style');
             disclaimerStyle.textContent = 'hallucination-disclaimer { display: block !important; visibility: hidden !important; height: 16px !important; overflow: hidden !important; }';
             document.head.appendChild(disclaimerStyle);
@@ -526,6 +839,9 @@
 
         function stop() {
             observer.disconnect(); observing = false;
+            document.removeEventListener('copy', copyProjection, true);
+            document.removeEventListener('load', presentationChanged, true);
+            global.removeEventListener('resize', presentationChanged);
             if (timer !== null) global.clearTimeout(timer);
             timer = null; dirty.clear(); scan = false;
             for (const element of active.keys()) restore(element);
