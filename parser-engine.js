@@ -62,10 +62,28 @@
         span.appendChild(node); return span;
     }
     const FORMATS = { B: 'bold', STRONG: 'bold', I: 'italic', EM: 'italic', S: 'strike', DEL: 'strike', U: 'underline', CODE: 'code' };
+    const REVEAL_CLASSES = new Set(['pending', 'animating', 'pendingp', 'pendingspan', 'pendingol', 'pendingul']);
     const EXCLUDED = 'pre,code,[contenteditable="true"],[contenteditable=""],user-query,.user-query,.query-text,[data-role="user"],.response-footer,' + NATIVE_ISLANDS;
     const INLINE_STYLE = ['color', 'background-color', 'font-family', 'font-size', 'font-weight', 'font-style',
         'line-height', 'letter-spacing', 'text-decoration', 'white-space', 'vertical-align', 'display', 'visibility', 'opacity'];
     const CODE_BOX_STYLE = ['display', 'padding', 'margin', 'border', 'border-radius'];
+    function presentationStyle(element, animated) {
+        const computed = global.getComputedStyle(element);
+        const reveal = animated && [...element.classList].some(name => REVEAL_CLASSES.has(name));
+        return { getPropertyValue(property) {
+            // Gemini inserts the full batch, then reveals pending words using
+            // CSS animation. A copied instantaneous opacity never advances in
+            // our shadow tree. The projection owns text arrival instead; do not
+            // replay that queue or switch back to it between parser snapshots.
+            // Explicit author styles remain intentional presentation.
+            if (reveal && property === 'opacity') return element.style.opacity || '1';
+            if (reveal && property === 'display' && element.classList.contains('pending') && !element.style.display) {
+                if (element.tagName === 'LI') return 'list-item';
+                return /^(P|H[1-6]|UL|OL|DIV|SECTION|BLOCKQUOTE)$/.test(element.tagName) ? 'block' : 'inline';
+            }
+            return computed.getPropertyValue(property);
+        } };
+    }
     const BASE_CSS = `
         .gp-original { position: absolute; width: 0; height: 0; overflow: hidden;
             opacity: 0; pointer-events: none; user-select: none; }
@@ -412,6 +430,8 @@
     function renderBlock(source, settings, colors, document, katex, markdown, nativeKey) {
         let changed = false;
         const islands = [];
+        const nativeMarkdown = !!source.closest('.markdown');
+        const animated = !!source.closest('.markdown.animate');
         function childrenOf(node) {
             const fragment = document.createDocumentFragment();
             let text = '';
@@ -440,7 +460,7 @@
                     // off, just as native <b>/<code> formatting does.
                     try {
                         const math = mathView(child.getAttribute('data-math'), child.matches('.math-block,math-block') || !!child.querySelector('.katex-display'), document, katex);
-                        const computed = global.getComputedStyle(child);
+                        const computed = presentationStyle(child, animated);
                         for (const [property, baseline] of [['display', 'inline'], ['visibility', 'visible'], ['opacity', '1']]) {
                             const value = computed.getPropertyValue(property);
                             if (property === 'display' ? value === 'none' : value !== baseline) math.style.setProperty(property, value);
@@ -454,9 +474,9 @@
                     changed = true; return;
                 }
                 // Gemini can split one token across adjacent Text nodes/spans.
-                const computedSpan = neutralSpan(child) ? global.getComputedStyle(child) : null;
-                const textPresentation = computedSpan && computedSpan.display === 'inline' && computedSpan.opacity === '1' &&
-                    computedSpan.backgroundColor === 'rgba(0, 0, 0, 0)' &&
+                const computedSpan = neutralSpan(child) ? presentationStyle(child, animated) : null;
+                const textPresentation = computedSpan && computedSpan.getPropertyValue('display') === 'inline' && computedSpan.getPropertyValue('opacity') === '1' &&
+                    computedSpan.getPropertyValue('background-color') === 'rgba(0, 0, 0, 0)' &&
                     ['padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'margin-top', 'margin-right',
                         'margin-bottom', 'margin-left', 'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width']
                         .every(property => computedSpan.getPropertyValue(property) === '0px');
@@ -472,12 +492,13 @@
                 }
                 flush();
                 const type = FORMATS[child.tagName];
-                const finalizedFormat = type && settings[type] && !child.hasAttribute('style') && !child.hasAttribute('class') &&
+                const finalizedFormat = type && settings[type] && !child.hasAttribute('style') &&
+                    (!child.hasAttribute('class') || (nativeMarkdown && [...child.classList].every(name => REVEAL_CLASSES.has(name)))) &&
                     (child.hasAttribute('data-path-to-node') || child.hasAttribute('data-index-in-node'));
                 const tag = finalizedFormat ? { bold: 'b', italic: 'i', strike: 's', underline: 'u', code: 'code' }[type] : child.tagName.toLowerCase();
                 const copy = document.createElement(tag);
                 if (!finalizedFormat) {
-                    const computed = global.getComputedStyle(child);
+                    const computed = presentationStyle(child, animated);
                     INLINE_STYLE.forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
                     if (child.tagName === 'CODE' || child.tagName === 'SPAN') CODE_BOX_STYLE.forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
                     if (LIST_TAGS.has(child.tagName)) ['margin', 'padding', 'list-style-type', 'list-style-position'].forEach(property => copy.style.setProperty(property, computed.getPropertyValue(property)));
@@ -612,7 +633,11 @@
                     if (!nativeKeys.has(node)) nativeKeys.set(node, String(++nextNativeKey));
                     return nativeKeys.get(node);
                 });
-                if (!parsed.changed) { if (active.has(element)) restore(element); return; }
+                // Keep one display owner throughout a response. Temporary plain
+                // text / split delimiters must not expose Gemini's older reveal
+                // queue. Animated paragraphs start projected even before their
+                // first complete Markdown token; off/unsafe/destroy still restore.
+                if (!parsed.changed && !active.has(element) && !element.closest('.markdown.animate')) return;
                 const entry = active.get(element) || projection(element);
                 if (!entry) return;
                 const css = styles();
@@ -627,6 +652,22 @@
             } catch (error) {
                 restore(element);
                 console.warn('[Gemini Parser] Kept native content after rendering error:', error);
+            }
+        }
+
+        function prepareSource(element) {
+            const children = [...element.childNodes].filter(node => node.nodeType === 1 || node.nodeType === 3);
+            const entry = active.get(element);
+            if (entry) {
+                // New light-DOM children are initially unassigned in a manual
+                // root. Measuring them then returns missing computed styles,
+                // which can split tokens or erase their presentation for one
+                // frame. Stage only new/hidden content before any block reads
+                // styles; already-visible native islands retain their slots.
+                const visible = new Set([...entry.view.querySelectorAll('slot[data-gp-native]')].flatMap(slot => slot.assignedNodes()));
+                assignSlot(entry.originalSlot, children.filter(node => !visible.has(node)));
+            } else if (passthrough.has(element)) {
+                assignSlot(roots.get(element).firstElementChild, children);
             }
         }
 
@@ -647,6 +688,9 @@
                 scan = false;
             }
             const batch = [...dirty]; dirty.clear();
+            // Stage ancestors before processing nested hosts as well. Their
+            // source styles depend on being in the parent's composed tree.
+            batch.forEach(prepareSource);
             // Inner mixed spans render first, then their original hosts are
             // slotted through outer projections. No native node is reparented.
             batch.sort((a, b) => a.contains(b) ? 1 : b.contains(a) ? -1 : 0).forEach(process);

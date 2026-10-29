@@ -46,6 +46,17 @@ async function fixture(t, options = {}) {
         <p id="outside">**outside**</p><hallucination-disclaimer>native disclaimer</hallucination-disclaimer>`);
     if (options.html) await page.evaluate(html => { document.querySelector('#answer').innerHTML = html; }, options.html);
     if (options.text !== undefined) await page.evaluate(text => { document.querySelector('#answer').textContent = text; }, options.text);
+    if (options.animated) {
+        await page.evaluate(() => document.querySelector('#response').classList.add('markdown', 'animate'));
+        // Gemini's observed reveal rules. Text exists in the DOM before its
+        // pending/animating spans advance; animation itself mutates no attributes.
+        await page.addStyleTag({ content: `
+            .markdown.animate .pending { display:none }
+            .markdown.animate :is(.pendingp,.pendingspan,.pendingol,.pendingul) { opacity:0 }
+            .markdown.animate .animating { animation:fixture-fade 20s linear forwards }
+            @keyframes fixture-fade { from {opacity:0} to {opacity:1} }
+        ` });
+    }
     for (const name of ['lib/katex.min.js', 'lib/markdown-it.min.js', 'parser-engine.js']) await page.addScriptTag({ path: path.join(root, name) });
     await page.evaluate(({ settings, css }) => {
         window.source = document.querySelector('#answer'); window.originalText = source.firstChild;
@@ -59,6 +70,96 @@ async function fixture(t, options = {}) {
 async function rendered(page, text) {
     await page.waitForFunction(expected => window.view()?.textContent === expected, text, { timeout: 3000 });
 }
+
+test('Gemini reveal phases keep one repaired paragraph instead of alternating full text and native fades', async t => {
+    const page = await fixture(t, { text: '**1 2 3**', animated: true });
+    const frames = await page.evaluate(async () => {
+        const initialView = view(), bold = view().querySelector('b');
+        source.innerHTML = '<span class="pending">**1 </span><span class="pending">2 </span><span class="pending">3**</span>';
+        const runs = [...source.children];
+        const frames = [];
+        async function sample() {
+            await new Promise(resolve => setTimeout(resolve, 40));
+            await new Promise(requestAnimationFrame);
+            frames.push({ sameView: view() === initialView, sameBold: view()?.querySelector('b') === bold,
+                text: view()?.textContent, spans: view() ? [...view().querySelectorAll('span')].map(span => ({display:getComputedStyle(span).display,opacity:getComputedStyle(span).opacity})) : [] });
+        }
+        await sample();
+        for (const run of runs) { run.className = 'animating'; await sample(); run.className = ''; await sample(); }
+        source.replaceChildren(Object.assign(document.createElement('b'), {textContent:'1 2 3'}));
+        source.firstChild.setAttribute('data-path-to-node','0');
+        document.querySelector('#response').classList.remove('animate'); await sample();
+        return frames;
+    });
+    assert.equal(frames.length, 8);
+    for (const frame of frames) {
+        assert.equal(frame.sameView, true); assert.equal(frame.sameBold, true, JSON.stringify(frames)); assert.equal(frame.text, '1 2 3');
+        assert.equal(frame.spans.some(span => span.display === 'none' || Number(span.opacity) < 1), false);
+    }
+});
+
+test('plain and temporarily incomplete streaming text stays in one projection until disabled', async t => {
+    const page = await fixture(t, { text: '1 2 3', animated: true });
+    assert.equal(await page.evaluate(() => !!view()), true);
+    await page.evaluate(() => { window.streamingView = view(); originalText.data = '**1'; });
+    await rendered(page, '**1');
+    await page.evaluate(() => { originalText.data = '**1 2**'; });
+    await rendered(page, '1 2');
+    await page.evaluate(() => { originalText.data = '1 2 3'; document.querySelector('#response').classList.remove('animate'); });
+    await rendered(page, '1 2 3');
+    assert.equal(await page.evaluate(() => view() === streamingView), true);
+    await page.evaluate(() => engine.updateSettings({enabled:false}));
+    assert.equal(await page.evaluate(() => !view() && source.innerText === '1 2 3'), true);
+});
+
+test('native pending markers do not sample animated opacity into a frozen preview or mutate the native queue', async t => {
+    const page = await fixture(t, { html: '**steady** <span class="animating">next</span> <span class="pendingp">last</span>', animated: true });
+    assert.deepEqual(await page.evaluate(() => {
+        const native = source.querySelector('.animating');
+        return [getComputedStyle(native).animationName, [...view().querySelectorAll('span')].map(span => [getComputedStyle(span).opacity,getComputedStyle(span).display]), source.innerHTML === originalMarkup];
+    }), ['fixture-fade', [], true]);
+    const before = await page.evaluate(() => engine.diagnostics());
+    await page.waitForTimeout(100);
+    assert.equal(await page.evaluate(() => engine.diagnostics().renderWrites), before.renderWrites);
+    await page.evaluate(() => engine.updateSettings({enabled:false}));
+    assert.equal(await page.evaluate(() => !view() && getComputedStyle(source.querySelector('.pendingp')).opacity === '0' && source.innerHTML === originalMarkup), true);
+});
+
+test('reveal normalization preserves explicit hidden/translucent content and is limited to Gemini animated Markdown', async t => {
+    const page = await fixture(t, { html: '**steady** <span class="pending" style="display:none">secret</span><span class="animating" style="opacity:.2">faint</span><span style="visibility:hidden">hidden</span>', animated: true });
+    assert.deepEqual(await page.evaluate(() => [...view().querySelectorAll('span')].map(span => [getComputedStyle(span).display,getComputedStyle(span).opacity,getComputedStyle(span).visibility])),
+        [['none','1','visible'],['inline','0.2','visible'],['inline','1','hidden']]);
+    const native = await fixture(t, { html: '**steady** <span class="pending" style="opacity:0">native hidden</span>' });
+    assert.equal(await native.evaluate(() => getComputedStyle(view().querySelector('span')).opacity), '0');
+});
+
+test('new manual-slot children have their native CSS before the first painted projection', async t => {
+    const page = await fixture(t);
+    assert.deepEqual(await page.evaluate(async () => {
+        source.innerHTML = '<span style="color:rgb(10,20,30);font-size:28px">**styled**</span>';
+        await new Promise(requestAnimationFrame);
+        const span = view().querySelector('b span');
+        return [view().textContent,span && getComputedStyle(span).color,span && getComputedStyle(span).fontSize];
+    }), ['styled','rgb(10, 20, 30)','28px']);
+});
+
+test('native reveal classes on finalized metadata bold, code and math retain streaming nodes', async t => {
+    const page = await fixture(t, { text: '**bold** `code` $x^2$', animated:true });
+    assert.deepEqual(await page.evaluate(async () => {
+        const before = ['b','code','.gemini-parser-math'].map(selector=>view().querySelector(selector));
+        const codeBox = () => {const style=getComputedStyle(view().querySelector('code'));return [style.fontFamily,style.fontSize,style.padding,style.backgroundColor];};
+        const beforeBox = codeBox();
+        const bold = document.createElement('b');bold.textContent='bold';bold.setAttribute('data-path-to-node','0');bold.className='animating';
+        const code = document.createElement('code');code.textContent='code';code.setAttribute('data-path-to-node','1');code.className='pending';
+        const math = document.createElement('span');math.className='math-inline animating';math.setAttribute('data-math','x^2');katex.render('x^2',math);
+        source.replaceChildren(bold,document.createTextNode(' '),code,document.createTextNode(' '),math);
+        await new Promise(requestAnimationFrame);
+        const stable = ['b','code','.gemini-parser-math'].map((selector,index)=>view().querySelector(selector)===before[index]);
+        document.querySelector('#response').classList.remove('animate');
+        await new Promise(resolve=>setTimeout(resolve,60));
+        return [...stable,JSON.stringify(codeBox())===JSON.stringify(beforeBox)];
+    }), [true,true,true,true]);
+});
 
 async function dragRendered(page, firstSelector, lastSelector = firstSelector) {
     const points = await page.evaluate(({ firstSelector, lastSelector }) => {
@@ -426,7 +527,8 @@ test('repeated rapid toggles never duplicate the view or lose source nodes', asy
 test('feature and color toggles re-render from source and reset without leftover formatting', async t => {
     const page = await fixture(t);
     await page.evaluate(() => engine.updateSettings({ bold: false }));
-    await page.waitForFunction(() => !view());
+    await rendered(page, '**alpha**');
+    assert.equal(await page.evaluate(() => view().querySelector('b')), null);
     assert.equal(await page.evaluate(() => source.innerText), '**alpha**');
     await page.evaluate(() => engine.updateSettings({ bold: true, boldColor: { color: '#0000ff', opacity: 75, customCss: 'letter-spacing:2px' } }));
     await rendered(page, 'alpha');
@@ -437,11 +539,12 @@ test('feature and color toggles re-render from source and reset without leftover
     assert.equal(await page.evaluate(() => source.innerHTML), '**alpha**');
 });
 
-test('changing raw content back to plain text restores original display', async t => {
+test('changing raw content back to plain text retains display ownership without changing native source', async t => {
     const page = await fixture(t);
+    await page.evaluate(() => { window.previousView = view(); });
     await page.evaluate(() => { originalText.data = 'plain again'; });
-    await page.waitForFunction(() => !view());
-    assert.equal(await page.evaluate(() => source.innerText), 'plain again');
+    await rendered(page, 'plain again');
+    assert.deepEqual(await page.evaluate(() => [view() === previousView, source.innerText, source.firstChild === originalText]), [true,'plain again',true]);
 });
 
 test('interactive content added during streaming stays live beside repaired text', async t => {
