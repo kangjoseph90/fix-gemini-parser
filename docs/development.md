@@ -31,6 +31,19 @@ the whole preview. New hosts and structural finalization are processed in the
 MutationObserver microtask before the next paint; plain token updates keep the
 40 ms coalescing window. Gemini's finished inline tokens keep the streaming fonts
 and formatting, and known path/index metadata does not trigger a native fallback.
+New native children are assigned to their original slot before computed styles
+are measured, including ancestors of nested projections. Unassigned light-DOM
+children in a manual shadow root otherwise return missing presentation values.
+
+Animated Markdown paragraphs start projected before their first complete format
+token and retain that projection through temporary plain text or split delimiters.
+The preview displays the latest DOM batch directly: Gemini's pending/animating
+word-reveal presentation is normalized only in copied text, instead of sampling
+animated opacity or switching back to the native fade queue. Original nodes,
+classes, CSS animations, and live widget slots remain unchanged. Explicit inline
+opacity/display and unrelated visibility styles are preserved; disabling restores
+Gemini's current native reveal state.
+
 Native inline visibility/opacity and explicit styles are retained. Class/style
 changes on ancestors inside the chat, stylesheet insertion/removal/text updates,
 stylesheet load, and viewport changes also refresh copied styles. Inert presentation
