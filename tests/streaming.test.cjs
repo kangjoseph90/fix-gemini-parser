@@ -192,6 +192,61 @@ test('Gemini animation classes and duration changes keep the projected paragraph
         nativeAnimation: true, nativeRestored: true });
 });
 
+test('new text fades once while earlier text and its in-flight fade keep their identity', async t => {
+    const page = await fixture(t, { text: '**steady** 1', animated: true });
+    const frames = await page.evaluate(async () => {
+        const bold = view().querySelector('b');
+        const firstFrame = async test => {
+            for (let i = 0; i < 20; i++) {
+                await new Promise(requestAnimationFrame);
+                if (test()) return;
+            }
+        };
+        originalText.data = '**steady** 1 2';
+        await firstFrame(() => view().querySelector('.gp-fade')?.getAnimations().length);
+        const second = view().querySelector('.gp-fade');
+        const firstAnimation = second?.getAnimations()[0];
+        // Keep this fade in flight even on a heavily loaded test runner.
+        firstAnimation?.pause();
+        const first = [second?.textContent.trim(), getComputedStyle(bold).opacity,
+            !!second && Number(getComputedStyle(second).opacity) < 1];
+        originalText.data = '**steady** 1 2 3';
+        await firstFrame(() => [...view().querySelectorAll('.gp-fade')].some(el => el.textContent.trim() === '3'));
+        const during = [view().querySelector('b') === bold, view().querySelector('.gp-fade') === second,
+            second?.getAnimations()[0] === firstAnimation, [...view().querySelectorAll('.gp-fade')].map(el => el.textContent.trim())];
+        firstAnimation?.finish();
+        for (const chunk of view().querySelectorAll('.gp-fade')) chunk.getAnimations().forEach(animation => animation.finish());
+        await firstFrame(() => !view().querySelector('.gp-fade'));
+        for (const text of ['**steady** 1 2', '**steady** 1 2 3']) {
+            originalText.data = text;
+            await firstFrame(() => view().textContent === text.replaceAll('**', ''));
+        }
+        source.className = 'animating';
+        await new Promise(requestAnimationFrame);
+        return { first, during, complete: [view().textContent, !!view().querySelector('.gp-fade'), getComputedStyle(source).opacity] };
+    });
+    assert.deepEqual(frames, { first: ['2', '1', true], during: [true, true, true, ['2', '3']], complete: ['steady 1 2 3', false, '1'] });
+});
+
+test('a new streaming paragraph fades on its first visible frame and reduced motion skips the effect', async t => {
+    const page = await fixture(t, { animated: true });
+    const insert = () => page.evaluate(async () => {
+        const paragraph = document.createElement('p');
+        paragraph.className = 'pending'; paragraph.textContent = '**new paragraph**';
+        document.getElementById('response').append(paragraph);
+        await new Promise(requestAnimationFrame);
+        const hidden = getComputedStyle(paragraph).display === 'none';
+        paragraph.className = 'animating';
+        await new Promise(requestAnimationFrame);
+        const chunk = paragraph.shadowRoot.querySelector('.gp-fade');
+        return [hidden, paragraph.shadowRoot.querySelector('b').textContent, getComputedStyle(paragraph).opacity,
+            chunk?.getAnimations().length ?? 0, chunk ? Number(getComputedStyle(chunk).opacity) < 1 : false];
+    });
+    assert.deepEqual(await insert(), [true, 'new paragraph', '1', 1, true]);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    assert.deepEqual(await insert(), [true, 'new paragraph', '1', 0, false]);
+});
+
 async function dragRendered(page, firstSelector, lastSelector = firstSelector) {
     const points = await page.evaluate(({ firstSelector, lastSelector }) => {
         const first = view().querySelector(firstSelector), last = view().querySelector(lastSelector);
@@ -765,6 +820,27 @@ test('table cells already on screen do not fade when Gemini animates the native 
         return frames;
     });
     assert.deepEqual(frames, Array.from({ length: 2 }, () => ['1', 'rgb(255, 204, 102)', true, true]));
+});
+
+test('table rewrites fade only a new cell or an appended suffix in a known cell', async t => {
+    const page = await fixture(t, { animated: true });
+    const result = await page.evaluate(async () => {
+        const container = document.createElement('div');
+        document.getElementById('response').append(container);
+        function table(rows) {
+            container.innerHTML = '<table data-path-to-node="1"><tbody>' + rows.map((text, i) =>
+                '<tr><td><span data-path-to-node="' + i + ',0"><b data-path-to-node="' + i + ',0">' + text + '</b></span></td></tr>').join('') + '</tbody></table>';
+        }
+        const frame = () => new Promise(requestAnimationFrame);
+        const faded = () => [...container.querySelectorAll('td > span')].map(cell =>
+            Array.from(cell.shadowRoot.querySelectorAll('.gp-fade'), chunk => chunk.textContent.trim()));
+        table(['steady', 'fixed']); await frame();
+        table(['steady suffix', 'fixed', 'new row']); await frame();
+        const during = faded();
+        table(['steady suffix', 'fixed', 'new row']); await frame();
+        return [during, faded()];
+    });
+    assert.deepEqual(result, [[['suffix'], [], ['new row']], [[], [], []]]);
 });
 
 test('table toggles, selection, off-stream updates and colors use one visible copy', async t => {

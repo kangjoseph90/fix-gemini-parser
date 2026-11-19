@@ -109,6 +109,10 @@
         .gp-original { position: absolute; width: 0; height: 0; overflow: hidden;
             opacity: 0; pointer-events: none; user-select: none; }
         .gp-view { white-space: inherit; }
+        @keyframes gp-text-in { from { opacity: .25; } to { opacity: 1; } }
+        @media (prefers-reduced-motion: no-preference) {
+            .gp-fade { animation: gp-text-in 180ms ease-out; }
+        }
         /* Page selectors cannot reach the shadow tree. Use inherited Gemini
            theme tokens so raw backticks and finalized CODE share a visible chip. */
         .gemini-parser-code {
@@ -196,26 +200,106 @@
         return math;
     }
 
+    // A text run represents one canonical Text node while its new suffix fades.
+    // Keep existing chunks through subsequent snapshots so their timers do not restart.
+    const fadingRuns = new WeakSet();
+
+    function textFadePlan(fragment, start) {
+        const plan = new WeakMap();
+        let offset = 0;
+        function visit(node) {
+            if (node.nodeType === 3) {
+                const index = Math.max(0, start - offset);
+                const suffix = node.data.slice(index);
+                if (/\S/.test(suffix) && !/^[\p{M}\u200d\udc00-\udfff]/u.test(suffix)) plan.set(node, index);
+                offset += node.length;
+            } else if (node.nodeType === 1 && node.matches('.gemini-parser-math')) {
+                offset += node.textContent.length;
+            } else node.childNodes.forEach(visit);
+        }
+        visit(fragment);
+        return plan;
+    }
+
+    function appendFadingText(current, suffix, start) {
+        const document = current.ownerDocument;
+        let run = current;
+        if (!fadingRuns.has(run)) {
+            run = document.createElement('span');
+            fadingRuns.add(run);
+            current.replaceWith(run);
+            run.append(current);
+        }
+        if (start > 0) run.append(suffix.slice(0, start));
+        const chunk = document.createElement('span');
+        chunk.className = 'gp-fade';
+        chunk.textContent = suffix.slice(start);
+        const settle = () => {
+            chunk.classList.remove('gp-fade');
+            if (!run.parentNode || document.getSelection()?.isCollapsed === false) return;
+            for (const finished of [...run.children]) {
+                if (!finished.classList.contains('gp-fade')) finished.replaceWith(...finished.childNodes);
+            }
+            const first = run.firstChild;
+            while (first.nextSibling?.nodeType === 3) {
+                first.appendData(first.nextSibling.data);
+                first.nextSibling.remove();
+            }
+            if (run.childNodes.length === 1) run.replaceWith(first);
+        };
+        chunk.addEventListener('animationend', settle, { once: true });
+        chunk.addEventListener('animationcancel', settle, { once: true });
+        run.append(chunk);
+    }
+
+    function fadeText(text, start) {
+        const suffix = text.data.slice(start);
+        text.deleteData(start, text.length - start);
+        appendFadingText(text, suffix, 0);
+    }
+
+    function fadeNewNodes(node, plan) {
+        if (!plan) return;
+        if (node.nodeType === 3) {
+            const start = plan.get(node);
+            if (start !== undefined) fadeText(node, start);
+        } else if (!node.matches?.('.gemini-parser-math')) [...node.childNodes].forEach(child => fadeNewNodes(child, plan));
+    }
+
     // Only extension-owned nodes are patched. Keeping an equal prefix (especially
     // KaTeX trees) avoids repainting/recreating completed content on every token.
-    function reconcile(parent, incoming) {
+    function reconcile(parent, incoming, plan) {
         let changed = false;
         const desired = Array.from(incoming.childNodes);
         desired.forEach((next, index) => {
-            const current = parent.childNodes[index];
-            if (!current) { parent.appendChild(next); changed = true; return; }
-            if (current.isEqualNode(next)) return;
-            if (current.nodeType !== next.nodeType || (current.nodeType === 1 &&
-                (current.tagName !== next.tagName || current.namespaceURI !== next.namespaceURI))) {
-                current.replaceWith(next); changed = true; return;
+            let current = parent.childNodes[index];
+            if (!current) { parent.appendChild(next); fadeNewNodes(next, plan); changed = true; return; }
+            const run = fadingRuns.has(current);
+            if (next.nodeType === 3 && (current.nodeType === 3 || run)) {
+                const old = run ? current.textContent : current.data;
+                if (old === next.data) return;
+                const start = plan?.get(next);
+                if (start !== undefined && start >= old.length && next.data.startsWith(old)) {
+                    appendFadingText(current, next.data.slice(old.length), start - old.length);
+                } else {
+                    if (run) {
+                        const first = current.firstChild;
+                        current.replaceWith(first);
+                        current = first;
+                    }
+                    let prefix = 0;
+                    while (prefix < current.length && prefix < next.length && current.data[prefix] === next.data[prefix]) prefix++;
+                    current.replaceData(prefix, current.length - prefix, next.data.slice(prefix));
+                    if (start !== undefined) fadeText(current, start);
+                }
+                changed = true; return;
             }
-            if (current.nodeType === 3) {
-                // Changing just the tail retains selection offsets in the prefix.
-                let prefix = 0;
-                while (prefix < current.length && prefix < next.length && current.data[prefix] === next.data[prefix]) prefix++;
-                current.replaceData(prefix, current.length - prefix, next.data.slice(prefix));
-                changed = true;
-            } else if (current.nodeType === 1) {
+            if (current.isEqualNode(next)) return;
+            if (run || current.nodeType !== next.nodeType || (current.nodeType === 1 &&
+                (current.tagName !== next.tagName || current.namespaceURI !== next.namespaceURI))) {
+                current.replaceWith(next); fadeNewNodes(next, plan); changed = true; return;
+            }
+            if (current.nodeType === 1) {
                 for (const attribute of Array.from(current.attributes)) {
                     if (!next.hasAttribute(attribute.name)) { current.removeAttribute(attribute.name); changed = true; }
                 }
@@ -224,7 +308,7 @@
                         current.setAttribute(attribute.name, attribute.value); changed = true;
                     }
                 }
-                changed = reconcile(current, next) || changed;
+                changed = reconcile(current, next, plan) || changed;
             } else { current.replaceWith(next); changed = true; }
         });
         while (parent.childNodes.length > desired.length) { parent.lastChild.remove(); changed = true; }
@@ -448,11 +532,11 @@
         return Array.from(element.children).every(child => nativeIsland(child, element) || safeInline(child));
     }
 
-    function renderBlock(source, settings, colors, document, katex, markdown, nativeKey) {
+    function renderBlock(source, settings, colors, document, katex, markdown, stream, nativeKey) {
         let changed = false;
         const islands = [];
-        const nativeMarkdown = !!source.closest('.markdown');
-        const animated = !!source.closest('.markdown.animate');
+        const animated = !!stream;
+        const nativeMarkdown = animated || !!source.closest('.markdown');
         function childrenOf(node) {
             const fragment = document.createDocumentFragment();
             let text = '';
@@ -573,6 +657,9 @@
         const colors = Object.fromEntries(COLOR_KEYS.map(key => [key, options.settings?.[key] ?? null]));
         const roots = new WeakMap();
         const nestedHosts = new WeakSet();
+        let insertedBlocks = new WeakSet();
+        let streamSnapshots = new WeakMap();
+        const reducedMotion = global.matchMedia?.('(prefers-reduced-motion: reduce)');
         const passthrough = new WeakMap();
         const nativeKeys = new WeakMap();
         let nextNativeKey = 0;
@@ -648,6 +735,39 @@
             active.set(element, entry); return entry;
         }
 
+        function revealPlan(element, entry, fragment, stream) {
+            const inserted = insertedBlocks.delete(element);
+            const next = fragment.textContent;
+            if (!stream) { entry.revealedText = next; return; }
+            let previous = entry.revealedText;
+            let firstAppearance = inserted;
+            const path = element.getAttribute('data-path-to-node');
+            // Table updates can replace the whole table, including unchanged cells.
+            // Remember cell text by its table and cell paths within this reply.
+            const parent = element.parentElement;
+            const cell = element.tagName === 'SPAN' && (parent?.tagName === 'TD' || parent?.tagName === 'TH');
+            if (path && (cell || element.matches('p,h1,h2,h3,h4,h5,h6'))) {
+                const tablePath = cell && parent.closest('table')?.getAttribute('data-path-to-node');
+                let state = streamSnapshots.get(stream);
+                if (!state) streamSnapshots.set(stream, state = { blocks: new Map(), tables: new Map() });
+                const key = tablePath ? `${tablePath}/${path}` : `${element.tagName}/${path}`;
+                previous ??= state.blocks.get(key);
+                if (tablePath) {
+                    if (!state.tables.has(tablePath)) state.tables.set(tablePath, counters.flushes);
+                    firstAppearance ||= state.tables.get(tablePath) < counters.flushes;
+                }
+                state.blocks.set(key, previous?.startsWith(next) ? previous : next);
+            }
+            entry.revealedText = previous?.startsWith(next) ? previous : next;
+            if (reducedMotion?.matches) return;
+            if (previous === undefined && firstAppearance) previous = '';
+            // A rewritten or reformatted prefix is already on screen. Animate
+            // only a proven append, and never replay the native fade queue.
+            if (previous !== undefined && next.length > previous.length && next.startsWith(previous)) {
+                return textFadePlan(fragment, previous.length);
+            }
+        }
+
         function process(element) {
             if (!safeBlock(element, nestedHosts.has(element))) { restore(element); snapshots.delete(element); return; }
             if (element.shadowRoot && element.shadowRoot !== roots.get(element)) return;
@@ -659,7 +779,8 @@
             if (previous?.source === snapshot && previous.revision === revision) return;
             snapshots.set(element, { source: snapshot, revision });
             try {
-                const parsed = renderBlock(element, settings, colors, document, katexCss ? options.katex : null, markdown, node => {
+                const stream = element.closest('.markdown.animate');
+                const parsed = renderBlock(element, settings, colors, document, katexCss ? options.katex : null, markdown, stream, node => {
                     if (!nativeKeys.has(node)) nativeKeys.set(node, String(++nextNativeKey));
                     return nativeKeys.get(node);
                 });
@@ -667,12 +788,14 @@
                 // text / split delimiters must not expose Gemini's older reveal
                 // queue. Animated paragraphs start projected even before their
                 // first complete Markdown token; off/unsafe/destroy still restore.
-                if (!parsed.changed && !active.has(element) && !element.closest('.markdown.animate')) return;
-                const entry = active.get(element) || projection(element);
+                const current = active.get(element);
+                if (!parsed.changed && !current && !stream) return;
+                const entry = current || projection(element);
                 if (!entry) return;
+                const plan = revealPlan(element, entry, parsed.fragment, stream);
                 const css = styles();
                 if (entry.style && entry.style.textContent !== css) entry.style.textContent = css;
-                if (reconcile(entry.view, parsed.fragment)) counters.renderWrites++;
+                if (reconcile(entry.view, parsed.fragment, plan)) counters.renderWrites++;
                 const nativeNodes = new Set(parsed.islands.map(island => island.node));
                 assignSlot(entry.originalSlot, [...element.childNodes].filter(node =>
                     (node.nodeType === 1 || node.nodeType === 3) && !nativeNodes.has(node)));
@@ -701,9 +824,10 @@
             }
         }
 
-        function queueBlocks(scope, invalidate = false) {
+        function queueBlocks(scope, { invalidate = false, inserted = false } = {}) {
             const queue = element => {
                 if (invalidate) snapshots.delete(element);
+                if (inserted) insertedBlocks.add(element);
                 dirty.add(element);
             };
             const isBlock = scope.matches(BLOCKS) || nestedHosts.has(scope);
@@ -758,6 +882,8 @@
             let fullScan = false;
             let structuralChange = false;
             const presentationScopes = new Set();
+            const replacedParents = new Set(records.filter(record => record.type === 'childList' &&
+                [...record.removedNodes].some(node => node.nodeType === 1)).map(record => record.target));
             for (const record of records) {
                 const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
                 if (target === fontStyle || target === pageStyle ||
@@ -789,7 +915,8 @@
                     for (const node of record.addedNodes) {
                         if (node.nodeType !== 1) continue;
                         if (node.closest('.chat-container')) {
-                            if (queueBlocks(node)) structuralChange = true;
+                            const inserted = !replacedParents.has(record.target) && !!node.closest('.markdown.animate');
+                            if (queueBlocks(node, { inserted })) structuralChange = true;
                         } else if (node.querySelector('.chat-container')) {
                             fullScan = true; structuralChange = true;
                         }
@@ -810,7 +937,7 @@
                     }
                 }
             }
-            presentationScopes.forEach(scope => queueBlocks(scope, true));
+            presentationScopes.forEach(scope => queueBlocks(scope, { invalidate: true }));
             if (fullScan || dirty.size) {
                 if (structuralChange) flushNow(fullScan);
                 else schedule(fullScan);
@@ -943,6 +1070,7 @@
 
         function stop() {
             observer.disconnect(); observing = false;
+            insertedBlocks = new WeakSet(); streamSnapshots = new WeakMap();
             document.removeEventListener('copy', copyProjection, true);
             document.removeEventListener('load', presentationChanged, true);
             global.removeEventListener('resize', presentationChanged);
