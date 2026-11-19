@@ -161,6 +161,37 @@ test('native reveal classes on finalized metadata bold, code and math retain str
     }), [true,true,true,true]);
 });
 
+test('Gemini animation classes and duration changes keep the projected paragraph visible and its code styled', async t => {
+    const page = await fixture(t, { text: '**steady** `code`', animated: true,
+        settings: { boldColor: { color: '#ffcc66' } } });
+    const result = await page.evaluate(async () => {
+        const initial = view();
+        const code = initial.querySelector('code');
+        const appearance = node => {
+            const s = getComputedStyle(node);
+            return [s.fontFamily, s.fontSize, s.padding, s.backgroundColor];
+        };
+        const before = appearance(code);
+        document.querySelector('#response').style.setProperty('--animation-duration', '20s');
+        source.className = 'animating first-token';
+        source.style.setProperty('--animation-duration', '20s');
+        source.innerHTML = '<b data-path-to-node="0" class="pending">steady</b> ' +
+            '<code data-path-to-node="0" class="first-token animating" style="--animation-duration: 20s">code</code>';
+        const frames = [];
+        for (const phase of ['animating first-token', 'first-token', 'animating']) {
+            source.className = phase;
+            await new Promise(requestAnimationFrame);
+            frames.push([getComputedStyle(source).opacity, view() === initial, view()?.querySelector('code') === code,
+                JSON.stringify(appearance(code)) === JSON.stringify(before), getComputedStyle(view().querySelector('b')).color]);
+        }
+        const nativeAnimation = source.getAnimations().some(animation => animation.animationName === 'fixture-fade');
+        engine.updateSettings({ enabled: false });
+        return { frames, nativeAnimation, nativeRestored: Number(getComputedStyle(source).opacity) < 1 && !view() };
+    });
+    assert.deepEqual(result, { frames: Array.from({ length: 3 }, () => ['1', true, true, true, 'rgb(255, 204, 102)']),
+        nativeAnimation: true, nativeRestored: true });
+});
+
 async function dragRendered(page, firstSelector, lastSelector = firstSelector) {
     const points = await page.evaluate(({ firstSelector, lastSelector }) => {
         const first = view().querySelector(firstSelector), last = view().querySelector(lastSelector);
@@ -708,6 +739,34 @@ test('streaming table replacements inside a response with a list style each new 
     assert.match(tree, /cell "one two three"/);
 });
 
+test('table cells already on screen do not fade when Gemini animates the native table or its wrapper', async t => {
+    const page = await tableFixture(t, '<tr><td><span data-path-to-node="1,0">**steady**</span></td></tr>',
+        { animated: true, settings: { boldColor: { color: '#ffcc66' } } });
+    const frames = await page.evaluate(async () => {
+        table.setAttribute('data-path-to-node', '1');
+        const bold = cellView().querySelector('b');
+        const response = document.querySelector('#response');
+        const frames = [];
+        for (const wrap of [false, true]) {
+            let animated = table;
+            if (wrap) {
+                response.insertAdjacentHTML('afterbegin', '<div class="horizontal-scroll-wrapper"><div class="table-block-component">' +
+                    '<response-element class="no-md"><table-block></table-block></response-element></div></div>');
+                response.querySelector('table-block').append(table.parentElement);
+                animated = response.querySelector('response-element');
+            }
+            animated.classList.add('animating');
+            animated.style.setProperty('--animation-duration', '20s');
+            await new Promise(requestAnimationFrame);
+            frames.push([getComputedStyle(animated).opacity, getComputedStyle(bold).color, cellView().querySelector('b') === bold,
+                !!animated.getAnimations().find(animation => animation.animationName === 'fixture-fade')]);
+            animated.classList.remove('animating');
+        }
+        return frames;
+    });
+    assert.deepEqual(frames, Array.from({ length: 2 }, () => ['1', 'rgb(255, 204, 102)', true, true]));
+});
+
 test('table toggles, selection, off-stream updates and colors use one visible copy', async t => {
     const page = await tableFixture(t, '<tr><td><span data-path-to-node="1,0">**cell value**</span></td><td>native</td></tr>');
     assert.equal(await page.evaluate(() => {
@@ -886,6 +945,26 @@ test('identical native citation HTML still updates the visible slot when Gemini 
     }), [true, true, true, true]);
 });
 
+test('an open citation retains focus when a newly completed inline token shifts its position', async t => {
+    const page = await fixture(t, { html: '**steady** <sources-carousel-inline><button id="focus-chip">Source</button>' +
+        '<div id="open-citation" hidden>Details</div></sources-carousel-inline>' });
+    await page.evaluate(() => {
+        const chip = document.querySelector('#focus-chip');
+        chip.addEventListener('click', () => { document.querySelector('#open-citation').hidden = false; });
+    });
+    await page.locator('#focus-chip').click();
+    const outcome = await page.evaluate(async () => {
+        const chip = document.querySelector('#focus-chip');
+        const bold = view().querySelector('b');
+        source.firstChild.data = '**steady** `new code` ';
+        await new Promise(resolve => setTimeout(resolve, 45));
+        await new Promise(requestAnimationFrame);
+        return [document.activeElement === chip, !document.querySelector('#open-citation').hidden,
+            view().querySelector('b') === bold, view().querySelector('code')?.textContent];
+    });
+    assert.deepEqual(outcome, [true, true, true, 'new code']);
+});
+
 test('citation focus, popup handlers and component lifecycle survive streaming and rapid toggles', async t => {
     const page = await fixture(t, { html: '**fixed** <sources-carousel-inline><button id="chip">PNG</button><div id="popup" hidden><p>**native popup**</p></div></sources-carousel-inline> tail' });
     await page.evaluate(() => {
@@ -996,6 +1075,31 @@ test('class-only completion is observed and identical content does not rewrite t
     await page.evaluate(() => document.querySelector('footer').classList.remove('animated'));
     await page.waitForFunction(count => engine.diagnostics().flushes > count, before.flushes);
     assert.equal(await page.evaluate(() => engine.diagnostics().renderWrites), before.renderWrites);
+});
+
+test('streaming animation updates do not re-render formulas in earlier responses', async t => {
+    const page = await fixture(t, { text: '$x^2$', animated: true });
+    await page.evaluate(() => {
+        const previous = document.createElement('section');
+        previous.className = 'markdown';
+        previous.innerHTML = '<p id="previous-formula">$y^2$</p>';
+        source.parentElement.before(previous);
+    });
+    await page.waitForFunction(() => document.querySelector('#previous-formula').shadowRoot?.querySelector('.katex'));
+    const equations = await page.evaluate(async () => {
+        const formulas = [];
+        const native = katex.render;
+        katex.render = (expression, ...args) => {
+            formulas.push(expression);
+            native(expression, ...args);
+        };
+        const response = document.querySelector('#response');
+        response.style.setProperty('--animation-duration', '120ms');
+        source.append(document.createElement('br'));
+        await new Promise(requestAnimationFrame);
+        return formulas;
+    });
+    assert.deepEqual(equations, ['x^2']);
 });
 
 test('500 synchronous updates coalesce and a sustained stream renders before its final token', async t => {

@@ -29,7 +29,7 @@
             [...node.attributes].every(attribute => INERT_ATTRIBUTES.has(attribute.name) || attribute.name.startsWith('_ngcontent-')) &&
             !/katex|mathjax|attachment|source-chip/i.test(node.className) &&
             (!/citation/i.test(node.className) || (node.tagName === 'SPAN' &&
-                [...node.classList].every(name => /^citation-(?:end-)?\d+$/.test(name))));
+                [...node.classList].every(name => /^citation-(?:end-)?\d+$/.test(name) || STREAM_CLASSES.has(name))));
     }
     function neutralSpan(node) {
         return node.nodeType === 1 && node.tagName === 'SPAN' && inertInline(node);
@@ -66,6 +66,14 @@
     }
     const FORMATS = { B: 'bold', STRONG: 'bold', I: 'italic', EM: 'italic', S: 'strike', DEL: 'strike', U: 'underline', CODE: 'code' };
     const REVEAL_CLASSES = new Set(['pending', 'animating', 'pendingp', 'pendingspan', 'pendingol', 'pendingul']);
+    const STREAM_CLASSES = new Set([...REVEAL_CLASSES, 'first-token']);
+    const FADE_SELECTOR = ':is(.animating,.pendingp,.pendingspan,.pendingol,.pendingul):not([style*="opacity" i])';
+    const TABLE_REVEAL_TARGETS = `:is(table[data-path-to-node],.table-block-component,${TABLE_COMPONENT},
+        .horizontal-scroll-wrapper:has(> table[data-path-to-node],> .table-block-component))`;
+    const PAGE_CSS = `
+        hallucination-disclaimer { display: block !important; visibility: hidden !important; height: 16px !important; overflow: hidden !important; }
+        .chat-container .markdown.animate ${TABLE_REVEAL_TARGETS}${FADE_SELECTOR} { opacity: 1 !important; }
+    `;
     const EXCLUDED = 'pre,code,[contenteditable="true"],[contenteditable=""],user-query,.user-query,.query-text,[data-role="user"],.response-footer,' + NATIVE_ISLANDS;
     function excluded(element) {
         const boundary = element.closest(EXCLUDED);
@@ -95,6 +103,9 @@
         } };
     }
     const BASE_CSS = `
+        /* The native animation may live on the projection host, outside its
+           view. Keep animationend for Gemini while holding rendered opacity. */
+        :host-context(.markdown.animate):host(${FADE_SELECTOR}) { opacity: 1 !important; }
         .gp-original { position: absolute; width: 0; height: 0; overflow: hidden;
             opacity: 0; pointer-events: none; user-select: none; }
         .gp-view { white-space: inherit; }
@@ -508,9 +519,11 @@
                     child.childNodes.forEach(node => visit(node, run)); return;
                 }
                 flush();
-                const finalizedFormat = type && settings[type] && !child.hasAttribute('style') &&
-                    (!child.hasAttribute('class') || (nativeMarkdown && [...child.classList].every(name => REVEAL_CLASSES.has(name)))) &&
-                    (child.hasAttribute('data-path-to-node') || child.hasAttribute('data-index-in-node'));
+                const finalizedFormat = type && settings[type] &&
+                    (child.hasAttribute('data-path-to-node') || child.hasAttribute('data-index-in-node')) &&
+                    ((!child.hasAttribute('style') && !child.hasAttribute('class')) ||
+                        (nativeMarkdown && [...child.classList].every(name => STREAM_CLASSES.has(name)) &&
+                            Array.from(child.style).every(name => name === '--animation-duration')));
                 const tag = finalizedFormat ? { bold: 'b', italic: 'i', strike: 's', underline: 'u', code: 'code' }[type] : child.tagName.toLowerCase();
                 const copy = document.createElement(tag);
                 if (!finalizedFormat) {
@@ -572,7 +585,7 @@
         let scan = false;
         let destroyed = false;
         let observing = false;
-        let disclaimerStyle = null;
+        let pageStyle = null;
         let fontStyle = null;
         let containers = new Set();
         let sharedSheet = null;
@@ -688,11 +701,20 @@
             }
         }
 
-        function queueBlocks(scope) {
-            const isBlock = scope.matches(BLOCKS);
+        function queueBlocks(scope, invalidate = false) {
+            const queue = element => {
+                if (invalidate) snapshots.delete(element);
+                dirty.add(element);
+            };
+            const isBlock = scope.matches(BLOCKS) || nestedHosts.has(scope);
             const descendants = scope.querySelectorAll(BLOCKS);
-            if (isBlock) dirty.add(scope);
-            descendants.forEach(element => dirty.add(element));
+            if (isBlock) queue(scope);
+            descendants.forEach(queue);
+            if (invalidate) {
+                for (const element of active.keys()) {
+                    if (nestedHosts.has(element) && scope.contains(element)) queue(element);
+                }
+            }
             return isBlock || descendants.length > 0;
         }
 
@@ -735,11 +757,12 @@
         const observer = new global.MutationObserver(records => {
             let fullScan = false;
             let structuralChange = false;
+            const presentationScopes = new Set();
             for (const record of records) {
                 const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
-                if (target === fontStyle || target === disclaimerStyle ||
+                if (target === fontStyle || target === pageStyle ||
                     (record.type === 'childList' && [...record.addedNodes, ...record.removedNodes].length &&
-                        [...record.addedNodes, ...record.removedNodes].every(node => node === fontStyle || node === disclaimerStyle))) continue;
+                        [...record.addedNodes, ...record.removedNodes].every(node => node === fontStyle || node === pageStyle))) continue;
                 if (target?.closest('head') && (target.matches('style,link') ||
                     [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1 && node.matches('style,link')))) {
                     revision++; fullScan = true;
@@ -778,14 +801,16 @@
                         if (record.type === 'attributes') snapshots.delete(parent);
                     }
                 } else if (record.type === 'childList' || target?.closest('.chat-container') || containers.has(target)) fullScan = true;
-                // Inline styles copied into the preview must follow ancestor
-                // theme changes too, even though the source HTML is unchanged.
-                if (record.type === 'attributes' && ['class', 'style'].includes(record.attributeName) &&
-                    [...containers].some(container => target === container || target?.contains(container) ||
-                        (container.contains(target) && target.querySelector(BLOCKS)))) {
-                    revision++; fullScan = true;
+                // Ancestor classes/styles affect their own descendants. A
+                // streaming response's reveal state must not re-parse history.
+                if (record.type === 'attributes' && ['class', 'style'].includes(record.attributeName)) {
+                    if (target.closest('.chat-container')) presentationScopes.add(target);
+                    else for (const container of containers) {
+                        if (target.contains(container)) presentationScopes.add(container);
+                    }
                 }
             }
+            presentationScopes.forEach(scope => queueBlocks(scope, true));
             if (fullScan || dirty.size) {
                 if (structuralChange) flushNow(fullScan);
                 else schedule(fullScan);
@@ -909,9 +934,9 @@
             document.addEventListener('copy', copyProjection, true);
             document.addEventListener('load', presentationChanged, true);
             global.addEventListener('resize', presentationChanged);
-            disclaimerStyle = document.createElement('style');
-            disclaimerStyle.textContent = 'hallucination-disclaimer { display: block !important; visibility: hidden !important; height: 16px !important; overflow: hidden !important; }';
-            document.head.appendChild(disclaimerStyle);
+            pageStyle = document.createElement('style');
+            pageStyle.textContent = PAGE_CSS;
+            document.head.appendChild(pageStyle);
             updateFonts();
             scan = true; flush();
         }
@@ -924,7 +949,7 @@
             if (timer !== null) global.clearTimeout(timer);
             timer = null; dirty.clear(); scan = false;
             for (const element of active.keys()) restore(element);
-            disclaimerStyle?.remove(); disclaimerStyle = null;
+            pageStyle?.remove(); pageStyle = null;
             fontStyle?.remove(); fontStyle = null; containers.clear();
         }
 
