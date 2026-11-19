@@ -930,6 +930,62 @@ test('Gemini XL grid keeps prose and list markers in the reading column when a t
     assert.deepEqual(await sample(), [[false, false, true, true], [false, false, true, true]]);
 });
 
+test('tables inside lists use the standalone table width and keep overflow inside the table', async t => {
+    const page = await fixture(t, { text: '**caption**' });
+    await page.setViewportSize({ width: 1440, height: 850 });
+    await page.addStyleTag({ content: `
+        .chat-container { width: 1200px; max-width: 100% }
+        .enable-extended-and-xl-grid .markdown > :not(#_) { max-width: 708px; margin-inline: auto }
+        .enable-extended-and-xl-grid .markdown > .md-has-block-component:not(#_):has(table-block) { max-width: none; margin-inline: 0 }
+        .markdown :is(ul,ol) { box-sizing: border-box; padding-inline-start: 4px }
+        .markdown li { padding-inline-start: 36px }
+        table-block { display: block }
+        .table-content { overflow-x: auto; padding-inline: max(0px, 50% - 354px) }
+        .table-content:has(td:nth-child(4)) { padding-inline: max(0px, 50% - 450px) }
+        table { width: 100%; min-width: 480px }
+    ` });
+    await page.evaluate(() => {
+        document.body.classList.add('enable-extended-and-xl-grid');
+        const response = document.querySelector('#response');
+        response.classList.add('markdown');
+        const block = (id, columns) => '<div id="' + id + '" class="horizontal-scroll-wrapper md-has-block-component">' +
+            '<div class="table-block-component"><response-element class="no-md"><table-block><div class="table-content">' +
+            '<table><tbody><tr>' + '<td><span data-path-to-node="1,0">**Cell**</span></td>'.repeat(columns) + '</tr></tbody></table>' +
+            '</div><button>Table menu</button></table-block></response-element></div></div>';
+        response.insertAdjacentHTML('beforeend', block('standalone-3', 3) + block('standalone-4', 4) +
+            '<ol class="md-has-block-component"><li><p>**List prose**</p>' + block('list-3', 3) +
+            '<ul><li><p>**Nested list prose**</p>' + block('list-4', 4) + '</li></ul></li></ol>');
+    });
+    const geometry = () => page.evaluate(() => {
+        const bounds = element => {
+            const rect = element.getBoundingClientRect();
+            return [rect.left, rect.width];
+        };
+        const standalone = [3, 4].map(n => bounds(document.querySelector(`#standalone-${n} table`)));
+        const nested = [3, 4].map(n => bounds(document.querySelector(`#list-${n} table`)));
+        const list = bounds(document.querySelector('.markdown > ol'));
+        const paragraph = bounds(document.querySelector('#answer'));
+        return { standalone, nested, aligned: list.every((value, index) => value === paragraph[index]),
+            viewportOverflow: document.documentElement.scrollWidth > innerWidth };
+    });
+    for (const direction of ['ltr', 'rtl']) {
+        await page.evaluate(direction => { document.querySelector('#response').dir = direction; }, direction);
+        const { standalone, nested, aligned, viewportOverflow } = await geometry();
+        assert.deepEqual(standalone.map(([, width]) => width), [708, 900]);
+        assert.deepEqual(nested, standalone);
+        assert.equal(aligned, true);
+        assert.equal(viewportOverflow, false);
+    }
+    await page.evaluate(() => { document.querySelector('#response').dir = 'ltr'; });
+    await page.setViewportSize({ width: 390, height: 850 });
+    assert.equal((await geometry()).viewportOverflow, false);
+    assert.equal(await page.locator('#list-4 .table-content').evaluate(scroller => {
+        scroller.scrollLeft = 50;
+        return scroller.scrollWidth > scroller.clientWidth && scroller.scrollLeft === 50;
+    }), true);
+    await page.locator('#list-4 button').click();
+});
+
 test('cell widgets, native formula hosts and unsupported attributes stay native, including late-arriving controls', async t => {
     const page = await tableFixture(t, '<tr><td><span data-path-to-node="1,0">**safe**</span></td><td>' +
         '<span role="button">**widget**</span><span tabindex="0">**focus**</span><span title="tooltip">**tip**</span>' +

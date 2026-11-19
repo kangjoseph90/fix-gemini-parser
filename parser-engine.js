@@ -70,14 +70,26 @@
     const FADE_SELECTOR = ':is(.animating,.pendingp,.pendingspan,.pendingol,.pendingul):not([style*="opacity" i])';
     const TABLE_REVEAL_TARGETS = `:is(table[data-path-to-node],.table-block-component,${TABLE_COMPONENT},
         .horizontal-scroll-wrapper:has(> table[data-path-to-node],> .table-block-component))`;
+    const XL_MARKDOWN = '.chat-container .markdown:where(.enable-extended-and-xl-grid *)';
+    const LIST_TABLE_WRAPPER = '> :is(ul,ol) li > .horizontal-scroll-wrapper';
+    const TABLE_WRAPPER_CHILD = '> :is(table,.table-block-component)';
     const PAGE_CSS = `
         hallucination-disclaimer { display: block !important; visibility: hidden !important; height: 16px !important; overflow: hidden !important; }
         .chat-container .markdown.animate ${TABLE_REVEAL_TARGETS}${FADE_SELECTOR} { opacity: 1 !important; }
-        /* XL grid widens a whole list for a nested table. Restore Gemini's
-           prose column for the list; the table component handles overflow. */
-        .chat-container .markdown:where(.enable-extended-and-xl-grid *) > :is(ul,ol):has(> li table-block) {
+        /* Keep list prose in Gemini's reading column. Only the table wrapper
+           spans the reply, so Gemini can size and scroll the table as usual. */
+        ${XL_MARKDOWN} > :is(ul,ol):has(> li :is(table,table-block)) {
             max-inline-size: 708px !important;
             margin-inline: auto !important;
+        }
+        ${XL_MARKDOWN}:has(${LIST_TABLE_WRAPPER} ${TABLE_WRAPPER_CHILD}) { container-type: inline-size; }
+        ${XL_MARKDOWN} ${LIST_TABLE_WRAPPER}:has(${TABLE_WRAPPER_CHILD}) {
+            box-sizing: border-box;
+            inline-size: 100cqi;
+            max-inline-size: none;
+            /* Subtract the reading gutter and the list's inline-start indent.
+               Here 100% is the width left after indentation at any depth. */
+            margin-inline: calc(100% - (100cqi + min(100cqi, 708px)) / 2) 0 !important;
         }
     `;
     const EXCLUDED = 'pre,code,[contenteditable="true"],[contenteditable=""],user-query,.user-query,.query-text,[data-role="user"],.response-footer,' + NATIVE_ISLANDS;
