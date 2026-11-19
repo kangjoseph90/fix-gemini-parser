@@ -638,6 +638,38 @@ test('table streaming and finalization retain source identity and stable formula
     }), 'replaced');
 });
 
+test('Gemini’s completed table component keeps styled cells and leaves export and other widgets native', async t => {
+    const page = await tableFixture(t, String.raw`<tr><td><span data-path-to-node="1,0">**steady** $x^2$</span></td></tr>`,
+        { animated: true, settings: { boldColor: { color: '#ffcc66' } } });
+    const result = await page.evaluate(async () => {
+        const oldView = cellView(), oldBold = oldView.querySelector('b'), oldMath = oldView.querySelector('.gemini-parser-math');
+        const response = document.querySelector('#response');
+        response.insertAdjacentHTML('afterbegin', '<div class="horizontal-scroll-wrapper md-has-block-component">' +
+            '<div class="table-block-component"><response-element class="no-md"><table-block>' +
+            '<div class="table-block"><button id="export">Export</button><p class="controls">**help**</p>' +
+            '<nested-widget><response-element><table><tbody><tr><td><span>**widget**</span></td></tr></tbody></table></response-element></nested-widget>' +
+            '</div></table-block></response-element></div></div>');
+        const block = response.querySelector('.table-block');
+        block.append(table.parentElement);
+        const exportButton = block.querySelector('#export');
+        let exports = 0;
+        exportButton.addEventListener('click', () => exports++);
+        cell.innerHTML = '<b data-path-to-node="1,0">steady</b> $x^2$';
+        response.classList.remove('animate');
+        await new Promise(requestAnimationFrame);
+        exportButton.click();
+        const styled = cellView()?.querySelector('b');
+        return {
+            steady: cellView() === oldView && styled === oldBold && cellView()?.querySelector('.gemini-parser-math') === oldMath,
+            color: styled && getComputedStyle(styled).color,
+            native: cell.parentElement.closest('table') === table && exports === 1 &&
+                !!exportButton.getBoundingClientRect().width && !block.querySelector('p').shadowRoot &&
+                !block.querySelector('nested-widget td > span').shadowRoot
+        };
+    });
+    assert.deepEqual(result, { steady: true, color: 'rgb(255, 204, 102)', native: true });
+});
+
 test('table toggles, selection, off-stream updates and colors use one visible copy', async t => {
     const page = await tableFixture(t, '<tr><td><span data-path-to-node="1,0">**cell value**</span></td><td>native</td></tr>');
     assert.equal(await page.evaluate(() => {
@@ -753,6 +785,67 @@ test('late citations mount before paint without dropping previously repaired tex
             view().querySelector('slot[data-gp-native]').assignedNodes()[0] === citation,
             button.getBoundingClientRect().height > 0];
     }), [true, true, true, true, true, true]);
+});
+
+test('Gemini citation ranges retain the streaming bold and live footnotes on the first frame', async t => {
+    const page = await fixture(t, { text: 'Start **cited text** tail', animated: true,
+        settings: { boldColor: { color: '#ffcc66', customCss: 'font-weight: 800' } } });
+    const result = await page.evaluate(async () => {
+        const oldView = view(), oldBold = oldView.querySelector('b');
+        source.innerHTML = '<span class="citation-120">Start </span><b data-path-to-node="0" data-index-in-node="1">' +
+            '<span class="citation-120">cited text</span></b><span class="citation-120 citation-end-120"> tail' +
+            '<source-footnote><button>Note</button></source-footnote></span> ' +
+            '<sources-carousel-inline><button>Source</button></sources-carousel-inline>';
+        document.querySelector('#response').classList.remove('animate');
+        const original = source.innerHTML;
+        const footnote = source.querySelector('source-footnote');
+        const chip = source.querySelector('sources-carousel-inline');
+        let clicks = 0;
+        footnote.querySelector('button').addEventListener('click', () => clicks++);
+        chip.querySelector('button').addEventListener('click', () => clicks++);
+        await new Promise(requestAnimationFrame);
+        footnote.querySelector('button').click(); chip.querySelector('button').click();
+        const styled = view()?.querySelector('b');
+        return {
+            steady: view() === oldView && styled === oldBold && styled?.textContent === 'cited text',
+            styles: styled && [getComputedStyle(styled).color, getComputedStyle(styled.firstChild.parentElement).fontWeight],
+            liveWidgets: [footnote, chip].every(n => n.getBoundingClientRect().width > 0) && clicks === 2,
+            original: source.innerHTML === original
+        };
+    });
+    assert.deepEqual(result, { steady: true, styles: ['rgb(255, 204, 102)', '800'], liveWidgets: true, original: true });
+    const tree = await page.locator('#answer').ariaSnapshot();
+    for (const text of ['cited text', 'Note', 'Source']) assert.equal(tree.split(text).length, 2, tree);
+});
+
+test('a citation ending inside a native bold keeps both its styling and its original footnote', async t => {
+    const page = await fixture(t, { html: '<b data-path-to-node="0"><span class="citation-5 citation-end-5">cited' +
+        '<source-footnote><button>Note</button></source-footnote></span></b> **tail**',
+        settings: { boldColor: { color: '#ffcc66', customCss: 'font-weight: 800' } } });
+    const styles = () => page.evaluate(() => {
+        const bold = source.querySelector('b');
+        return [getComputedStyle(bold).color, getComputedStyle(bold).fontWeight, source.innerHTML === originalMarkup];
+    });
+    assert.deepEqual(await styles(), ['rgb(255, 204, 102)', '800', true]);
+    await page.locator('source-footnote button').click();
+    await page.evaluate(() => engine.updateSettings({ enabled: false }));
+    assert.deepEqual(await styles(), ['rgb(0, 0, 0)', '700', true]);
+    await page.evaluate(() => engine.updateSettings({ enabled: true }));
+    assert.deepEqual(await styles(), ['rgb(255, 204, 102)', '800', true]);
+});
+
+test('identical native citation HTML still updates the visible slot when Gemini replaces the node', async t => {
+    const page = await fixture(t, { html: '**steady** <sources-carousel-inline><button>Source</button></sources-carousel-inline>' });
+    assert.deepEqual(await page.evaluate(async () => {
+        const oldBold = view().querySelector('b');
+        const chip = source.querySelector('sources-carousel-inline');
+        const replacement = chip.cloneNode(true);
+        chip.replaceWith(replacement);
+        await new Promise(requestAnimationFrame);
+        return [view().querySelector('b') === oldBold, source.innerHTML === originalMarkup,
+            view().querySelector('slot[data-gp-native]').assignedNodes()[0] === replacement,
+            replacement.getBoundingClientRect().width > 0];
+    }), [true, true, true, true]);
 });
 
 test('citation focus, popup handlers and component lifecycle survive streaming and rapid toggles', async t => {

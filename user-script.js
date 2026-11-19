@@ -24,10 +24,14 @@
     // TD/TH cannot host a shadow root. Gemini already wraps cell content in a
     // SPAN: project on that existing node, leaving table layout/copy DOM intact.
     const TEXT_BLOCKS = 'p,h1,h2,h3,h4,h5,h6,td > span,th > span';
+    const TABLE_COMPONENT = '.markdown .table-block-component > response-element.no-md';
+    const TABLE_CELLS = TABLE_COMPONENT + ' > table-block .table-content table :is(td,th) > span';
     // LI cannot host a shadow tree. Project a bare list on its existing supported
     // parent instead; the original UL/LI/text nodes keep their parents and data.
     const LIST_HOSTS = ':is(div,section,article,main,blockquote):has(> ul,> ol)';
-    const MIXED_SPANS = 'span:has(sources-carousel-inline,source-inline-chip,response-element,a,button,input,select,textarea,[tabindex])';
+    // Live Gemini components are assigned to slots, never duplicated.
+    const NATIVE_ISLANDS = 'sources-carousel-inline,source-inline-chip,source-footnote,response-element';
+    const MIXED_SPANS = `span:has(${NATIVE_ISLANDS},a,button,input,select,textarea,[tabindex])`;
     const BLOCKS = TEXT_BLOCKS + ',' + LIST_HOSTS + ',' + MIXED_SPANS;
     const INLINE_TAGS = new Set(['SPAN', 'B', 'STRONG', 'I', 'EM', 'S', 'DEL', 'U', 'CODE', 'BR', 'SUP', 'SUB', 'MARK']);
     const LIST_TAGS = new Set(['UL', 'OL', 'LI']);
@@ -40,11 +44,10 @@
     function inertInline(node) {
         return INLINE_TAGS.has(node.tagName) && !node.isContentEditable &&
             [...node.attributes].every(attribute => INERT_ATTRIBUTES.has(attribute.name) || attribute.name.startsWith('_ngcontent-')) &&
-            !/katex|mathjax|citation|attachment|source-chip/i.test(node.className);
+            !/katex|mathjax|attachment|source-chip/i.test(node.className) &&
+            (!/citation/i.test(node.className) || (node.tagName === 'SPAN' &&
+                [...node.classList].every(name => /^citation-(?:end-)?\d+$/.test(name))));
     }
-    // These are live Gemini components, not text to clone or parse. Only direct
-    // host children can be displayed unchanged through a manually assigned slot.
-    const NATIVE_ISLANDS = 'sources-carousel-inline,source-inline-chip,response-element';
     function neutralSpan(node) {
         return node.nodeType === 1 && node.tagName === 'SPAN' && inertInline(node);
     }
@@ -81,6 +84,13 @@
     const FORMATS = { B: 'bold', STRONG: 'bold', I: 'italic', EM: 'italic', S: 'strike', DEL: 'strike', U: 'underline', CODE: 'code' };
     const REVEAL_CLASSES = new Set(['pending', 'animating', 'pendingp', 'pendingspan', 'pendingol', 'pendingul']);
     const EXCLUDED = 'pre,code,[contenteditable="true"],[contenteditable=""],user-query,.user-query,.query-text,[data-role="user"],.response-footer,' + NATIVE_ISLANDS;
+    function excluded(element) {
+        const boundary = element.closest(EXCLUDED);
+        if (!boundary) return false;
+        // Gemini's generated table mounts inside a response-element. Its cells
+        // are answer text, while its toolbar and any nested widgets stay native.
+        return !(boundary.matches(TABLE_COMPONENT) && element.closest(TABLE_CELLS) && !boundary.parentElement.closest(EXCLUDED));
+    }
     const INLINE_STYLE = ['color', 'background-color', 'font-family', 'font-size', 'font-weight', 'font-style',
         'line-height', 'letter-spacing', 'text-decoration', 'white-space', 'vertical-align', 'display', 'visibility', 'opacity'];
     const CODE_BOX_STYLE = ['display', 'padding', 'margin', 'border', 'border-radius'];
@@ -423,7 +433,7 @@
     }
 
     function safeBlock(element, nestedHost = false) {
-        if ((!nestedHost && !element.matches(BLOCKS)) || !element.isConnected || !element.closest('.chat-container') || element.closest(EXCLUDED) || element.isContentEditable) return false;
+        if ((!nestedHost && !element.matches(BLOCKS)) || !element.isConnected || !element.closest('.chat-container') || excluded(element) || element.isContentEditable) return false;
         if (listHost(element)) return true;
         if (!nestedHost && !element.matches(TEXT_BLOCKS + ',' + MIXED_SPANS)) return false;
         if ([...element.querySelectorAll(TEXT_BLOCKS)].some(block => {
@@ -453,7 +463,7 @@
             const fragment = document.createDocumentFragment();
             let text = '';
             let presentations = [];
-            const baseline = global.getComputedStyle(source);
+            const baseline = global.getComputedStyle(node);
             function flush() {
                 if (!text) return;
                 const parsed = parseText(text, settings, document, katex, markdown, 0, presentations);
@@ -465,10 +475,17 @@
                     text += child.nodeValue; return;
                 }
                 if (child.nodeType !== 1) return;
+                const type = FORMATS[child.tagName];
                 if (nativeIsland(child, source)) {
                     flush();
                     const key = nativeKey(child);
                     const slot = document.createElement('slot'); slot.setAttribute('data-gp-native', key);
+                    // A footnote sometimes ends inside a <b>. Keep the native
+                    // formatting element with its footnote and style it via the slot.
+                    if (type && settings[type] && inertInline(child) && child.querySelector('source-footnote')) {
+                        slot.setAttribute('data-gp-format', type);
+                        changed = true;
+                    }
                     islands.push({ node: child, key }); fragment.appendChild(slot); return;
                 }
                 if (nativeMath(child)) {
@@ -508,7 +525,6 @@
                     child.childNodes.forEach(node => visit(node, run)); return;
                 }
                 flush();
-                const type = FORMATS[child.tagName];
                 const finalizedFormat = type && settings[type] && !child.hasAttribute('style') &&
                     (!child.hasAttribute('class') || (nativeMarkdown && [...child.classList].every(name => REVEAL_CLASSES.has(name)))) &&
                     (child.hasAttribute('data-path-to-node') || child.hasAttribute('data-index-in-node'));
@@ -549,7 +565,8 @@
             if (value.color) declaration.setProperty('color', value.color);
             if (Number.isFinite(value.opacity)) declaration.setProperty('opacity', String(Math.max(0, Math.min(100, value.opacity)) / 100));
             Array.from(declaration).forEach(property => declaration.setProperty(property, declaration.getPropertyValue(property), 'important'));
-            return `.gemini-parser-${key.slice(0, -5)} { ${declaration.cssText} }`;
+            const type = key.slice(0, -5);
+            return `.gemini-parser-${type}, slot[data-gp-format="${type}"]::slotted(*) { ${declaration.cssText} }`;
         }).join('\n');
     }
 
@@ -738,18 +755,22 @@
                     revision++; fullScan = true;
                 }
                 const block = target?.closest(BLOCKS);
+                const elementChildrenChanged = record.type === 'childList' &&
+                    [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1);
                 let projectedAncestor = false;
                 for (let parent = target; parent; parent = parent.parentElement) {
                     if (active.has(parent)) {
                         projectedAncestor = true; dirty.add(parent);
-                        if (record.type === 'attributes') snapshots.delete(parent);
+                        // A slotted child can be replaced by an identical HTML
+                        // node. Its old assignment cannot follow the replacement.
+                        if (record.type === 'attributes' || (parent === target && elementChildrenChanged)) snapshots.delete(parent);
                     }
                 }
                 if (record.type === 'childList') {
                     // A new/replaced host otherwise shows raw content until the
                     // 40 ms token timer fires. Mount it in this microtask, before
                     // the next paint. Plain Text updates still use coalescing.
-                    if (projectedAncestor && [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1)) structuralChange = true;
+                    if (projectedAncestor && elementChildrenChanged) structuralChange = true;
                     if (Array.from(record.addedNodes).some(node => node.nodeType === 1 &&
                         (node.matches(BLOCKS) || node.querySelector(BLOCKS)) &&
                         (target?.closest('.chat-container') || node.matches('.chat-container') || node.querySelector('.chat-container')))) structuralChange = true;
