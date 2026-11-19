@@ -688,6 +688,14 @@
             }
         }
 
+        function queueBlocks(scope) {
+            const isBlock = scope.matches(BLOCKS);
+            const descendants = scope.querySelectorAll(BLOCKS);
+            if (isBlock) dirty.add(scope);
+            descendants.forEach(element => dirty.add(element));
+            return isBlock || descendants.length > 0;
+        }
+
         function flush() {
             timer = null;
             if (destroyed || !settings.enabled) return;
@@ -698,8 +706,7 @@
             if (scan) {
                 containers = new Set(document.querySelectorAll('.chat-container'));
                 containers.forEach(container => {
-                    if (container.matches(BLOCKS)) dirty.add(container);
-                    container.querySelectorAll(BLOCKS).forEach(element => dirty.add(element));
+                    queueBlocks(container);
                     container.querySelectorAll('span').forEach(element => { if (nestedHosts.has(element)) dirty.add(element); });
                 });
                 scan = false;
@@ -754,9 +761,16 @@
                     // 40 ms token timer fires. Mount it in this microtask, before
                     // the next paint. Plain Text updates still use coalescing.
                     if (projectedAncestor && elementChildrenChanged) structuralChange = true;
-                    if (Array.from(record.addedNodes).some(node => node.nodeType === 1 &&
-                        (node.matches(BLOCKS) || node.querySelector(BLOCKS)) &&
-                        (target?.closest('.chat-container') || node.matches('.chat-container') || node.querySelector('.chat-container')))) structuralChange = true;
+                    // A response with a list can itself be a block. Its table
+                    // cells still need to be queued when Gemini replaces the table.
+                    for (const node of record.addedNodes) {
+                        if (node.nodeType !== 1) continue;
+                        if (node.closest('.chat-container')) {
+                            if (queueBlocks(node)) structuralChange = true;
+                        } else if (node.querySelector('.chat-container')) {
+                            fullScan = true; structuralChange = true;
+                        }
+                    }
                 }
                 if (block && (block.closest('.chat-container') || active.has(block))) {
                     for (let parent = block; parent?.closest('.chat-container'); parent = parent.parentElement?.closest(BLOCKS)) {

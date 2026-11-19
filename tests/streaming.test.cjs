@@ -670,6 +670,44 @@ test('Gemini’s completed table component keeps styled cells and leaves export 
     assert.deepEqual(result, { steady: true, color: 'rgb(255, 204, 102)', native: true });
 });
 
+test('streaming table replacements inside a response with a list style each new cell before paint', async t => {
+    const page = await fixture(t, { animated: true, settings: { boldColor: { color: '#ffcc66' } } });
+    await page.evaluate(() => {
+        const response = document.querySelector('#response');
+        response.insertAdjacentHTML('beforeend', '<ul><li>**list stays styled**</li></ul>' +
+            '<div id="raw-table"></div><div class="table-block-component"><response-element class="no-md">' +
+            '<table-block><div class="table-content" id="component-table"></div>' +
+            '<button id="export-streaming-table">Export</button></table-block></response-element></div>');
+    });
+    await page.waitForFunction(() => document.querySelector('#response').shadowRoot?.querySelector('.gemini-parser-bold'));
+    const frames = await page.evaluate(async () => {
+        const listView = document.querySelector('#response').shadowRoot.querySelector('.gp-view');
+        const listBold = listView.querySelector('.gemini-parser-bold');
+        const frames = [];
+        for (const id of ['raw-table', 'component-table']) {
+            const tableHost = document.getElementById(id);
+            for (const text of ['one', 'one two', 'one two three']) {
+                // Gemini replaces the native table as it receives the next
+                // snapshot, including when table-block updates its innerHTML.
+                tableHost.innerHTML = '<table data-path-to-node="0"><tbody><tr><td><span data-path-to-node="0,0">' +
+                    '<b data-path-to-node="0,0" data-index-in-node="0">' + text + '</b></span></td></tr></tbody></table>';
+                const original = tableHost.innerHTML;
+                const span = tableHost.querySelector('td > span');
+                await new Promise(requestAnimationFrame);
+                const bold = span.shadowRoot?.querySelector('.gemini-parser-bold');
+                frames.push({ source: id, text: bold?.textContent, color: bold && getComputedStyle(bold).color,
+                    original: tableHost.innerHTML === original, listStable: listView.querySelector('.gemini-parser-bold') === listBold });
+            }
+        }
+        return frames;
+    });
+    assert.deepEqual(frames, ['raw-table', 'component-table'].flatMap(source =>
+        ['one', 'one two', 'one two three'].map(text => ({ source, text, color: 'rgb(255, 204, 102)', original: true, listStable: true }))));
+    assert.equal(await page.locator('#export-streaming-table').isVisible(), true);
+    const tree = await page.locator('#component-table table').ariaSnapshot();
+    assert.match(tree, /cell "one two three"/);
+});
+
 test('table toggles, selection, off-stream updates and colors use one visible copy', async t => {
     const page = await tableFixture(t, '<tr><td><span data-path-to-node="1,0">**cell value**</span></td><td>native</td></tr>');
     assert.equal(await page.evaluate(() => {
