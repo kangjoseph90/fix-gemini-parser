@@ -456,6 +456,12 @@
 
     function parseText(text, options, document, katex, markdown, depth = 0, presentations = []) {
         const fragment = document.createDocumentFragment();
+        // Native formatting already provides the structure for most table cells.
+        // Plain runs with no presentation boundaries need no inline tokenization.
+        if (presentations.length === 0 && !/[\r\n\0\\`*_~$\[\]!<&]/.test(text)) {
+            if (text) fragment.appendChild(document.createTextNode(text));
+            return { fragment, changed: false };
+        }
         if (depth > 24 || !['bold', 'italic', 'strike', 'underline', 'code', 'latex'].some(key => options[key])) {
             appendLiteral(fragment, text, document); return { fragment, changed: false };
         }
