@@ -885,6 +885,51 @@ test('table geometry, spanning cells and horizontal scrolling remain native and 
     }), true);
 });
 
+test('Gemini XL grid keeps prose and list markers in the reading column when a table mounts in a list', async t => {
+    const page = await fixture(t, { text: '**caption**', animated: true });
+    await page.setViewportSize({ width: 1440, height: 850 });
+    await page.addStyleTag({ content: `
+        .chat-container { width: 1200px; max-width: 100% }
+        .enable-extended-and-xl-grid .markdown > :not(#_) { max-width: 708px; margin-inline: auto }
+        .enable-extended-and-xl-grid .markdown > .md-has-block-component:not(#_):has(table-block) { max-width: none; margin-inline: 0 }
+        .markdown > :is(ul,ol) { box-sizing: border-box; padding-inline-start: 36px }
+        .table-content { overflow-x: auto }
+        table { min-width: 1440px }
+    ` });
+    const sample = () => page.evaluate(() => {
+        const paragraph = document.querySelector('#answer').getBoundingClientRect();
+        return [...document.querySelectorAll('#response > ul,#response > ol')].map(list => {
+            const { left, width } = list.getBoundingClientRect();
+            const item = list.firstElementChild.getBoundingClientRect();
+            const wrapper = list.querySelector('.table-content');
+            return [left === paragraph.left, width === paragraph.width, item.left > left,
+                wrapper.scrollWidth > wrapper.clientWidth];
+        });
+    });
+    await page.evaluate(async () => {
+        document.body.classList.add('enable-extended-and-xl-grid');
+        const response = document.querySelector('#response');
+        response.insertAdjacentHTML('beforeend', ['ul', 'ol'].map(tag => `<${tag}><li><p>**Text next to a table**</p></li></${tag}>`).join(''));
+        await new Promise(requestAnimationFrame);
+        for (const item of response.querySelectorAll(':scope > :is(ul,ol) > li')) {
+            item.parentElement.classList.add('md-has-block-component');
+            item.insertAdjacentHTML('beforeend', '<div class="horizontal-scroll-wrapper"><div class="table-block-component">' +
+                '<response-element class="no-md"><table-block><div class="table-content"><table><tbody><tr><td>' +
+                '<span data-path-to-node="1,0">**Cell**</span></td></tr></tbody></table></div>' +
+                '<button>Table menu</button></table-block></response-element></div></div>');
+        }
+        await new Promise(requestAnimationFrame);
+    });
+    assert.deepEqual(await sample(), [[true, true, true, true], [true, true, true, true]]);
+    assert.equal(await page.locator('td > span .gemini-parser-bold').count(), 2);
+    assert.equal(await page.getByRole('button', { name: 'Table menu' }).first().isVisible(), true);
+    await page.setViewportSize({ width: 390, height: 850 });
+    assert.deepEqual(await sample(), [[true, true, true, true], [true, true, true, true]]);
+    await page.setViewportSize({ width: 1440, height: 850 });
+    await page.evaluate(() => engine.updateSettings({ enabled: false }));
+    assert.deepEqual(await sample(), [[false, false, true, true], [false, false, true, true]]);
+});
+
 test('cell widgets, native formula hosts and unsupported attributes stay native, including late-arriving controls', async t => {
     const page = await tableFixture(t, '<tr><td><span data-path-to-node="1,0">**safe**</span></td><td>' +
         '<span role="button">**widget**</span><span tabindex="0">**focus**</span><span title="tooltip">**tip**</span>' +

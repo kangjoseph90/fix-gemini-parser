@@ -90,6 +90,12 @@
     const PAGE_CSS = `
         hallucination-disclaimer { display: block !important; visibility: hidden !important; height: 16px !important; overflow: hidden !important; }
         .chat-container .markdown.animate ${TABLE_REVEAL_TARGETS}${FADE_SELECTOR} { opacity: 1 !important; }
+        /* XL grid widens a whole list for a nested table. Restore Gemini's
+           prose column for the list; the table component handles overflow. */
+        .chat-container .markdown:where(.enable-extended-and-xl-grid *) > :is(ul,ol):has(> li table-block) {
+            max-inline-size: 708px !important;
+            margin-inline: auto !important;
+        }
     `;
     const EXCLUDED = 'pre,code,[contenteditable="true"],[contenteditable=""],user-query,.user-query,.query-text,[data-role="user"],.response-footer,' + NATIVE_ISLANDS;
     function excluded(element) {
