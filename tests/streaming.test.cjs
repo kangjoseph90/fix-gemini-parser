@@ -46,6 +46,17 @@ async function fixture(t, options = {}) {
         <p id="outside">**outside**</p><hallucination-disclaimer>native disclaimer</hallucination-disclaimer>`);
     if (options.html) await page.evaluate(html => { document.querySelector('#answer').innerHTML = html; }, options.html);
     if (options.text !== undefined) await page.evaluate(text => { document.querySelector('#answer').textContent = text; }, options.text);
+    if (options.animated) {
+        await page.evaluate(() => document.querySelector('#response').classList.add('markdown', 'animate'));
+        // Gemini's observed reveal rules. Text exists in the DOM before its
+        // pending/animating spans advance; animation itself mutates no attributes.
+        await page.addStyleTag({ content: `
+            .markdown.animate .pending { display:none }
+            .markdown.animate :is(.pendingp,.pendingspan,.pendingol,.pendingul) { opacity:0 }
+            .markdown.animate .animating { animation:fixture-fade 20s linear forwards }
+            @keyframes fixture-fade { from {opacity:0} to {opacity:1} }
+        ` });
+    }
     for (const name of ['lib/katex.min.js', 'lib/markdown-it.min.js', 'parser-engine.js']) await page.addScriptTag({ path: path.join(root, name) });
     await page.evaluate(({ settings, css }) => {
         window.source = document.querySelector('#answer'); window.originalText = source.firstChild;
@@ -59,6 +70,182 @@ async function fixture(t, options = {}) {
 async function rendered(page, text) {
     await page.waitForFunction(expected => window.view()?.textContent === expected, text, { timeout: 3000 });
 }
+
+test('Gemini reveal phases keep one repaired paragraph instead of alternating full text and native fades', async t => {
+    const page = await fixture(t, { text: '**1 2 3**', animated: true });
+    const frames = await page.evaluate(async () => {
+        const initialView = view(), bold = view().querySelector('b');
+        source.innerHTML = '<span class="pending">**1 </span><span class="pending">2 </span><span class="pending">3**</span>';
+        const runs = [...source.children];
+        const frames = [];
+        async function sample() {
+            await new Promise(resolve => setTimeout(resolve, 40));
+            await new Promise(requestAnimationFrame);
+            frames.push({ sameView: view() === initialView, sameBold: view()?.querySelector('b') === bold,
+                text: view()?.textContent, spans: view() ? [...view().querySelectorAll('span')].map(span => ({display:getComputedStyle(span).display,opacity:getComputedStyle(span).opacity})) : [] });
+        }
+        await sample();
+        for (const run of runs) { run.className = 'animating'; await sample(); run.className = ''; await sample(); }
+        source.replaceChildren(Object.assign(document.createElement('b'), {textContent:'1 2 3'}));
+        source.firstChild.setAttribute('data-path-to-node','0');
+        document.querySelector('#response').classList.remove('animate'); await sample();
+        return frames;
+    });
+    assert.equal(frames.length, 8);
+    for (const frame of frames) {
+        assert.equal(frame.sameView, true); assert.equal(frame.sameBold, true, JSON.stringify(frames)); assert.equal(frame.text, '1 2 3');
+        assert.equal(frame.spans.some(span => span.display === 'none' || Number(span.opacity) < 1), false);
+    }
+});
+
+test('plain and temporarily incomplete streaming text stays in one projection until disabled', async t => {
+    const page = await fixture(t, { text: '1 2 3', animated: true });
+    assert.equal(await page.evaluate(() => !!view()), true);
+    await page.evaluate(() => { window.streamingView = view(); originalText.data = '**1'; });
+    await rendered(page, '**1');
+    await page.evaluate(() => { originalText.data = '**1 2**'; });
+    await rendered(page, '1 2');
+    await page.evaluate(() => { originalText.data = '1 2 3'; document.querySelector('#response').classList.remove('animate'); });
+    await rendered(page, '1 2 3');
+    assert.equal(await page.evaluate(() => view() === streamingView), true);
+    await page.evaluate(() => engine.updateSettings({enabled:false}));
+    assert.equal(await page.evaluate(() => !view() && source.innerText === '1 2 3'), true);
+});
+
+test('native pending markers do not sample animated opacity into a frozen preview or mutate the native queue', async t => {
+    const page = await fixture(t, { html: '**steady** <span class="animating">next</span> <span class="pendingp">last</span>', animated: true });
+    assert.deepEqual(await page.evaluate(() => {
+        const native = source.querySelector('.animating');
+        return [getComputedStyle(native).animationName, [...view().querySelectorAll('span')].map(span => [getComputedStyle(span).opacity,getComputedStyle(span).display]), source.innerHTML === originalMarkup];
+    }), ['fixture-fade', [], true]);
+    const before = await page.evaluate(() => engine.diagnostics());
+    await page.waitForTimeout(100);
+    assert.equal(await page.evaluate(() => engine.diagnostics().renderWrites), before.renderWrites);
+    await page.evaluate(() => engine.updateSettings({enabled:false}));
+    assert.equal(await page.evaluate(() => !view() && getComputedStyle(source.querySelector('.pendingp')).opacity === '0' && source.innerHTML === originalMarkup), true);
+});
+
+test('reveal normalization preserves explicit hidden/translucent content and is limited to Gemini animated Markdown', async t => {
+    const page = await fixture(t, { html: '**steady** <span class="pending" style="display:none">secret</span><span class="animating" style="opacity:.2">faint</span><span style="visibility:hidden">hidden</span>', animated: true });
+    assert.deepEqual(await page.evaluate(() => [...view().querySelectorAll('span')].map(span => [getComputedStyle(span).display,getComputedStyle(span).opacity,getComputedStyle(span).visibility])),
+        [['none','1','visible'],['inline','0.2','visible'],['inline','1','hidden']]);
+    const native = await fixture(t, { html: '**steady** <span class="pending" style="opacity:0">native hidden</span>' });
+    assert.equal(await native.evaluate(() => getComputedStyle(view().querySelector('span')).opacity), '0');
+});
+
+test('new manual-slot children have their native CSS before the first painted projection', async t => {
+    const page = await fixture(t);
+    assert.deepEqual(await page.evaluate(async () => {
+        source.innerHTML = '<span style="color:rgb(10,20,30);font-size:28px">**styled**</span>';
+        await new Promise(requestAnimationFrame);
+        const span = view().querySelector('b span');
+        return [view().textContent,span && getComputedStyle(span).color,span && getComputedStyle(span).fontSize];
+    }), ['styled','rgb(10, 20, 30)','28px']);
+});
+
+test('native reveal classes on finalized metadata bold, code and math retain streaming nodes', async t => {
+    const page = await fixture(t, { text: '**bold** `code` $x^2$', animated:true });
+    assert.deepEqual(await page.evaluate(async () => {
+        const before = ['b','code','.gemini-parser-math'].map(selector=>view().querySelector(selector));
+        const codeBox = () => {const style=getComputedStyle(view().querySelector('code'));return [style.fontFamily,style.fontSize,style.padding,style.backgroundColor];};
+        const beforeBox = codeBox();
+        const bold = document.createElement('b');bold.textContent='bold';bold.setAttribute('data-path-to-node','0');bold.className='animating';
+        const code = document.createElement('code');code.textContent='code';code.setAttribute('data-path-to-node','1');code.className='pending';
+        const math = document.createElement('span');math.className='math-inline animating';math.setAttribute('data-math','x^2');katex.render('x^2',math);
+        source.replaceChildren(bold,document.createTextNode(' '),code,document.createTextNode(' '),math);
+        await new Promise(requestAnimationFrame);
+        const stable = ['b','code','.gemini-parser-math'].map((selector,index)=>view().querySelector(selector)===before[index]);
+        document.querySelector('#response').classList.remove('animate');
+        await new Promise(resolve=>setTimeout(resolve,60));
+        return [...stable,JSON.stringify(codeBox())===JSON.stringify(beforeBox)];
+    }), [true,true,true,true]);
+});
+
+test('Gemini animation classes and duration changes keep the projected paragraph visible and its code styled', async t => {
+    const page = await fixture(t, { text: '**steady** `code`', animated: true,
+        settings: { boldColor: { color: '#ffcc66' } } });
+    const result = await page.evaluate(async () => {
+        const initial = view();
+        const code = initial.querySelector('code');
+        const appearance = node => {
+            const s = getComputedStyle(node);
+            return [s.fontFamily, s.fontSize, s.padding, s.backgroundColor];
+        };
+        const before = appearance(code);
+        document.querySelector('#response').style.setProperty('--animation-duration', '20s');
+        source.className = 'animating first-token';
+        source.style.setProperty('--animation-duration', '20s');
+        source.innerHTML = '<b data-path-to-node="0" class="pending">steady</b> ' +
+            '<code data-path-to-node="0" class="first-token animating" style="--animation-duration: 20s">code</code>';
+        const frames = [];
+        for (const phase of ['animating first-token', 'first-token', 'animating']) {
+            source.className = phase;
+            await new Promise(requestAnimationFrame);
+            frames.push([getComputedStyle(source).opacity, view() === initial, view()?.querySelector('code') === code,
+                JSON.stringify(appearance(code)) === JSON.stringify(before), getComputedStyle(view().querySelector('b')).color]);
+        }
+        const nativeAnimation = source.getAnimations().some(animation => animation.animationName === 'fixture-fade');
+        engine.updateSettings({ enabled: false });
+        return { frames, nativeAnimation, nativeRestored: Number(getComputedStyle(source).opacity) < 1 && !view() };
+    });
+    assert.deepEqual(result, { frames: Array.from({ length: 3 }, () => ['1', true, true, true, 'rgb(255, 204, 102)']),
+        nativeAnimation: true, nativeRestored: true });
+});
+
+test('new text fades once while earlier text and its in-flight fade keep their identity', async t => {
+    const page = await fixture(t, { text: '**steady** 1', animated: true });
+    const frames = await page.evaluate(async () => {
+        const bold = view().querySelector('b');
+        const firstFrame = async test => {
+            for (let i = 0; i < 20; i++) {
+                await new Promise(requestAnimationFrame);
+                if (test()) return;
+            }
+        };
+        originalText.data = '**steady** 1 2';
+        await firstFrame(() => view().querySelector('.gp-fade')?.getAnimations().length);
+        const second = view().querySelector('.gp-fade');
+        const firstAnimation = second?.getAnimations()[0];
+        // Keep this fade in flight even on a heavily loaded test runner.
+        firstAnimation?.pause();
+        const first = [second?.textContent.trim(), getComputedStyle(bold).opacity,
+            !!second && Number(getComputedStyle(second).opacity) < 1];
+        originalText.data = '**steady** 1 2 3';
+        await firstFrame(() => [...view().querySelectorAll('.gp-fade')].some(el => el.textContent.trim() === '3'));
+        const during = [view().querySelector('b') === bold, view().querySelector('.gp-fade') === second,
+            second?.getAnimations()[0] === firstAnimation, [...view().querySelectorAll('.gp-fade')].map(el => el.textContent.trim())];
+        firstAnimation?.finish();
+        for (const chunk of view().querySelectorAll('.gp-fade')) chunk.getAnimations().forEach(animation => animation.finish());
+        await firstFrame(() => !view().querySelector('.gp-fade'));
+        for (const text of ['**steady** 1 2', '**steady** 1 2 3']) {
+            originalText.data = text;
+            await firstFrame(() => view().textContent === text.replaceAll('**', ''));
+        }
+        source.className = 'animating';
+        await new Promise(requestAnimationFrame);
+        return { first, during, complete: [view().textContent, !!view().querySelector('.gp-fade'), getComputedStyle(source).opacity] };
+    });
+    assert.deepEqual(frames, { first: ['2', '1', true], during: [true, true, true, ['2', '3']], complete: ['steady 1 2 3', false, '1'] });
+});
+
+test('a new streaming paragraph fades on its first visible frame and reduced motion skips the effect', async t => {
+    const page = await fixture(t, { animated: true });
+    const insert = () => page.evaluate(async () => {
+        const paragraph = document.createElement('p');
+        paragraph.className = 'pending'; paragraph.textContent = '**new paragraph**';
+        document.getElementById('response').append(paragraph);
+        await new Promise(requestAnimationFrame);
+        const hidden = getComputedStyle(paragraph).display === 'none';
+        paragraph.className = 'animating';
+        await new Promise(requestAnimationFrame);
+        const chunk = paragraph.shadowRoot.querySelector('.gp-fade');
+        return [hidden, paragraph.shadowRoot.querySelector('b').textContent, getComputedStyle(paragraph).opacity,
+            chunk?.getAnimations().length ?? 0, chunk ? Number(getComputedStyle(chunk).opacity) < 1 : false];
+    });
+    assert.deepEqual(await insert(), [true, 'new paragraph', '1', 1, true]);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    assert.deepEqual(await insert(), [true, 'new paragraph', '1', 0, false]);
+});
 
 async function dragRendered(page, firstSelector, lastSelector = firstSelector) {
     const points = await page.evaluate(({ firstSelector, lastSelector }) => {
@@ -426,7 +613,8 @@ test('repeated rapid toggles never duplicate the view or lose source nodes', asy
 test('feature and color toggles re-render from source and reset without leftover formatting', async t => {
     const page = await fixture(t);
     await page.evaluate(() => engine.updateSettings({ bold: false }));
-    await page.waitForFunction(() => !view());
+    await rendered(page, '**alpha**');
+    assert.equal(await page.evaluate(() => view().querySelector('b')), null);
     assert.equal(await page.evaluate(() => source.innerText), '**alpha**');
     await page.evaluate(() => engine.updateSettings({ bold: true, boldColor: { color: '#0000ff', opacity: 75, customCss: 'letter-spacing:2px' } }));
     await rendered(page, 'alpha');
@@ -437,11 +625,12 @@ test('feature and color toggles re-render from source and reset without leftover
     assert.equal(await page.evaluate(() => source.innerHTML), '**alpha**');
 });
 
-test('changing raw content back to plain text restores original display', async t => {
+test('changing raw content back to plain text retains display ownership without changing native source', async t => {
     const page = await fixture(t);
+    await page.evaluate(() => { window.previousView = view(); });
     await page.evaluate(() => { originalText.data = 'plain again'; });
-    await page.waitForFunction(() => !view());
-    assert.equal(await page.evaluate(() => source.innerText), 'plain again');
+    await rendered(page, 'plain again');
+    assert.deepEqual(await page.evaluate(() => [view() === previousView, source.innerText, source.firstChild === originalText]), [true,'plain again',true]);
 });
 
 test('interactive content added during streaming stays live beside repaired text', async t => {
@@ -535,6 +724,125 @@ test('table streaming and finalization retain source identity and stable formula
     }), 'replaced');
 });
 
+test('Gemini’s completed table component keeps styled cells and leaves export and other widgets native', async t => {
+    const page = await tableFixture(t, String.raw`<tr><td><span data-path-to-node="1,0">**steady** $x^2$</span></td></tr>`,
+        { animated: true, settings: { boldColor: { color: '#ffcc66' } } });
+    const result = await page.evaluate(async () => {
+        const oldView = cellView(), oldBold = oldView.querySelector('b'), oldMath = oldView.querySelector('.gemini-parser-math');
+        const response = document.querySelector('#response');
+        response.insertAdjacentHTML('afterbegin', '<div class="horizontal-scroll-wrapper md-has-block-component">' +
+            '<div class="table-block-component"><response-element class="no-md"><table-block>' +
+            '<div class="table-block"><button id="export">Export</button><p class="controls">**help**</p>' +
+            '<nested-widget><response-element><table><tbody><tr><td><span>**widget**</span></td></tr></tbody></table></response-element></nested-widget>' +
+            '</div></table-block></response-element></div></div>');
+        const block = response.querySelector('.table-block');
+        block.append(table.parentElement);
+        const exportButton = block.querySelector('#export');
+        let exports = 0;
+        exportButton.addEventListener('click', () => exports++);
+        cell.innerHTML = '<b data-path-to-node="1,0">steady</b> $x^2$';
+        response.classList.remove('animate');
+        await new Promise(requestAnimationFrame);
+        exportButton.click();
+        const styled = cellView()?.querySelector('b');
+        return {
+            steady: cellView() === oldView && styled === oldBold && cellView()?.querySelector('.gemini-parser-math') === oldMath,
+            color: styled && getComputedStyle(styled).color,
+            native: cell.parentElement.closest('table') === table && exports === 1 &&
+                !!exportButton.getBoundingClientRect().width && !block.querySelector('p').shadowRoot &&
+                !block.querySelector('nested-widget td > span').shadowRoot
+        };
+    });
+    assert.deepEqual(result, { steady: true, color: 'rgb(255, 204, 102)', native: true });
+});
+
+test('streaming table replacements inside a response with a list style each new cell before paint', async t => {
+    const page = await fixture(t, { animated: true, settings: { boldColor: { color: '#ffcc66' } } });
+    await page.evaluate(() => {
+        const response = document.querySelector('#response');
+        response.insertAdjacentHTML('beforeend', '<ul><li>**list stays styled**</li></ul>' +
+            '<div id="raw-table"></div><div class="table-block-component"><response-element class="no-md">' +
+            '<table-block><div class="table-content" id="component-table"></div>' +
+            '<button id="export-streaming-table">Export</button></table-block></response-element></div>');
+    });
+    await page.waitForFunction(() => document.querySelector('#response').shadowRoot?.querySelector('.gemini-parser-bold'));
+    const frames = await page.evaluate(async () => {
+        const listView = document.querySelector('#response').shadowRoot.querySelector('.gp-view');
+        const listBold = listView.querySelector('.gemini-parser-bold');
+        const frames = [];
+        for (const id of ['raw-table', 'component-table']) {
+            const tableHost = document.getElementById(id);
+            for (const text of ['one', 'one two', 'one two three']) {
+                // Gemini replaces the native table as it receives the next
+                // snapshot, including when table-block updates its innerHTML.
+                tableHost.innerHTML = '<table data-path-to-node="0"><tbody><tr><td><span data-path-to-node="0,0">' +
+                    '<b data-path-to-node="0,0" data-index-in-node="0">' + text + '</b></span></td></tr></tbody></table>';
+                const original = tableHost.innerHTML;
+                const span = tableHost.querySelector('td > span');
+                await new Promise(requestAnimationFrame);
+                const bold = span.shadowRoot?.querySelector('.gemini-parser-bold');
+                frames.push({ source: id, text: bold?.textContent, color: bold && getComputedStyle(bold).color,
+                    original: tableHost.innerHTML === original, listStable: listView.querySelector('.gemini-parser-bold') === listBold });
+            }
+        }
+        return frames;
+    });
+    assert.deepEqual(frames, ['raw-table', 'component-table'].flatMap(source =>
+        ['one', 'one two', 'one two three'].map(text => ({ source, text, color: 'rgb(255, 204, 102)', original: true, listStable: true }))));
+    assert.equal(await page.locator('#export-streaming-table').isVisible(), true);
+    const tree = await page.locator('#component-table table').ariaSnapshot();
+    assert.match(tree, /cell "one two three"/);
+});
+
+test('table cells already on screen do not fade when Gemini animates the native table or its wrapper', async t => {
+    const page = await tableFixture(t, '<tr><td><span data-path-to-node="1,0">**steady**</span></td></tr>',
+        { animated: true, settings: { boldColor: { color: '#ffcc66' } } });
+    const frames = await page.evaluate(async () => {
+        table.setAttribute('data-path-to-node', '1');
+        const bold = cellView().querySelector('b');
+        const response = document.querySelector('#response');
+        const frames = [];
+        for (const wrap of [false, true]) {
+            let animated = table;
+            if (wrap) {
+                response.insertAdjacentHTML('afterbegin', '<div class="horizontal-scroll-wrapper"><div class="table-block-component">' +
+                    '<response-element class="no-md"><table-block></table-block></response-element></div></div>');
+                response.querySelector('table-block').append(table.parentElement);
+                animated = response.querySelector('response-element');
+            }
+            animated.classList.add('animating');
+            animated.style.setProperty('--animation-duration', '20s');
+            await new Promise(requestAnimationFrame);
+            frames.push([getComputedStyle(animated).opacity, getComputedStyle(bold).color, cellView().querySelector('b') === bold,
+                !!animated.getAnimations().find(animation => animation.animationName === 'fixture-fade')]);
+            animated.classList.remove('animating');
+        }
+        return frames;
+    });
+    assert.deepEqual(frames, Array.from({ length: 2 }, () => ['1', 'rgb(255, 204, 102)', true, true]));
+});
+
+test('table rewrites fade only a new cell or an appended suffix in a known cell', async t => {
+    const page = await fixture(t, { animated: true });
+    const result = await page.evaluate(async () => {
+        const container = document.createElement('div');
+        document.getElementById('response').append(container);
+        function table(rows) {
+            container.innerHTML = '<table data-path-to-node="1"><tbody>' + rows.map((text, i) =>
+                '<tr><td><span data-path-to-node="' + i + ',0"><b data-path-to-node="' + i + ',0">' + text + '</b></span></td></tr>').join('') + '</tbody></table>';
+        }
+        const frame = () => new Promise(requestAnimationFrame);
+        const faded = () => [...container.querySelectorAll('td > span')].map(cell =>
+            Array.from(cell.shadowRoot.querySelectorAll('.gp-fade'), chunk => chunk.textContent.trim()));
+        table(['steady', 'fixed']); await frame();
+        table(['steady suffix', 'fixed', 'new row']); await frame();
+        const during = faded();
+        table(['steady suffix', 'fixed', 'new row']); await frame();
+        return [during, faded()];
+    });
+    assert.deepEqual(result, [[['suffix'], [], ['new row']], [[], [], []]]);
+});
+
 test('table toggles, selection, off-stream updates and colors use one visible copy', async t => {
     const page = await tableFixture(t, '<tr><td><span data-path-to-node="1,0">**cell value**</span></td><td>native</td></tr>');
     assert.equal(await page.evaluate(() => {
@@ -575,6 +883,107 @@ test('table geometry, spanning cells and horizontal scrolling remain native and 
         const wrapper = table.parentElement; wrapper.scrollLeft = 50;
         return wrapper.scrollWidth > wrapper.clientWidth && wrapper.scrollLeft === 50;
     }), true);
+});
+
+test('Gemini XL grid keeps prose and list markers in the reading column when a table mounts in a list', async t => {
+    const page = await fixture(t, { text: '**caption**', animated: true });
+    await page.setViewportSize({ width: 1440, height: 850 });
+    await page.addStyleTag({ content: `
+        .chat-container { width: 1200px; max-width: 100% }
+        .enable-extended-and-xl-grid .markdown > :not(#_) { max-width: 708px; margin-inline: auto }
+        .enable-extended-and-xl-grid .markdown > .md-has-block-component:not(#_):has(table-block) { max-width: none; margin-inline: 0 }
+        .markdown > :is(ul,ol) { box-sizing: border-box; padding-inline-start: 36px }
+        .table-content { overflow-x: auto }
+        table { min-width: 1440px }
+    ` });
+    const sample = () => page.evaluate(() => {
+        const paragraph = document.querySelector('#answer').getBoundingClientRect();
+        return [...document.querySelectorAll('#response > ul,#response > ol')].map(list => {
+            const { left, width } = list.getBoundingClientRect();
+            const item = list.firstElementChild.getBoundingClientRect();
+            const wrapper = list.querySelector('.table-content');
+            return [left === paragraph.left, width === paragraph.width, item.left > left,
+                wrapper.scrollWidth > wrapper.clientWidth];
+        });
+    });
+    await page.evaluate(async () => {
+        document.body.classList.add('enable-extended-and-xl-grid');
+        const response = document.querySelector('#response');
+        response.insertAdjacentHTML('beforeend', ['ul', 'ol'].map(tag => `<${tag}><li><p>**Text next to a table**</p></li></${tag}>`).join(''));
+        await new Promise(requestAnimationFrame);
+        for (const item of response.querySelectorAll(':scope > :is(ul,ol) > li')) {
+            item.parentElement.classList.add('md-has-block-component');
+            item.insertAdjacentHTML('beforeend', '<div class="horizontal-scroll-wrapper"><div class="table-block-component">' +
+                '<response-element class="no-md"><table-block><div class="table-content"><table><tbody><tr><td>' +
+                '<span data-path-to-node="1,0">**Cell**</span></td></tr></tbody></table></div>' +
+                '<button>Table menu</button></table-block></response-element></div></div>');
+        }
+        await new Promise(requestAnimationFrame);
+    });
+    assert.deepEqual(await sample(), [[true, true, true, true], [true, true, true, true]]);
+    assert.equal(await page.locator('td > span .gemini-parser-bold').count(), 2);
+    assert.equal(await page.getByRole('button', { name: 'Table menu' }).first().isVisible(), true);
+    await page.setViewportSize({ width: 390, height: 850 });
+    assert.deepEqual(await sample(), [[true, true, true, true], [true, true, true, true]]);
+    await page.setViewportSize({ width: 1440, height: 850 });
+    await page.evaluate(() => engine.updateSettings({ enabled: false }));
+    assert.deepEqual(await sample(), [[false, false, true, true], [false, false, true, true]]);
+});
+
+test('tables inside lists use the standalone table width and keep overflow inside the table', async t => {
+    const page = await fixture(t, { text: '**caption**' });
+    await page.setViewportSize({ width: 1440, height: 850 });
+    await page.addStyleTag({ content: `
+        .chat-container { width: 1200px; max-width: 100% }
+        .enable-extended-and-xl-grid .markdown > :not(#_) { max-width: 708px; margin-inline: auto }
+        .enable-extended-and-xl-grid .markdown > .md-has-block-component:not(#_):has(table-block) { max-width: none; margin-inline: 0 }
+        .markdown :is(ul,ol) { box-sizing: border-box; padding-inline-start: 4px }
+        .markdown li { padding-inline-start: 36px }
+        table-block { display: block }
+        .table-content { overflow-x: auto; padding-inline: max(0px, 50% - 354px) }
+        .table-content:has(td:nth-child(4)) { padding-inline: max(0px, 50% - 450px) }
+        table { width: 100%; min-width: 480px }
+    ` });
+    await page.evaluate(() => {
+        document.body.classList.add('enable-extended-and-xl-grid');
+        const response = document.querySelector('#response');
+        response.classList.add('markdown');
+        const block = (id, columns) => '<div id="' + id + '" class="horizontal-scroll-wrapper md-has-block-component">' +
+            '<div class="table-block-component"><response-element class="no-md"><table-block><div class="table-content">' +
+            '<table><tbody><tr>' + '<td><span data-path-to-node="1,0">**Cell**</span></td>'.repeat(columns) + '</tr></tbody></table>' +
+            '</div><button>Table menu</button></table-block></response-element></div></div>';
+        response.insertAdjacentHTML('beforeend', block('standalone-3', 3) + block('standalone-4', 4) +
+            '<ol class="md-has-block-component"><li><p>**List prose**</p>' + block('list-3', 3) +
+            '<ul><li><p>**Nested list prose**</p>' + block('list-4', 4) + '</li></ul></li></ol>');
+    });
+    const geometry = () => page.evaluate(() => {
+        const bounds = element => {
+            const rect = element.getBoundingClientRect();
+            return [rect.left, rect.width];
+        };
+        const standalone = [3, 4].map(n => bounds(document.querySelector(`#standalone-${n} table`)));
+        const nested = [3, 4].map(n => bounds(document.querySelector(`#list-${n} table`)));
+        const list = bounds(document.querySelector('.markdown > ol'));
+        const paragraph = bounds(document.querySelector('#answer'));
+        return { standalone, nested, aligned: list.every((value, index) => value === paragraph[index]),
+            viewportOverflow: document.documentElement.scrollWidth > innerWidth };
+    });
+    for (const direction of ['ltr', 'rtl']) {
+        await page.evaluate(direction => { document.querySelector('#response').dir = direction; }, direction);
+        const { standalone, nested, aligned, viewportOverflow } = await geometry();
+        assert.deepEqual(standalone.map(([, width]) => width), [708, 900]);
+        assert.deepEqual(nested, standalone);
+        assert.equal(aligned, true);
+        assert.equal(viewportOverflow, false);
+    }
+    await page.evaluate(() => { document.querySelector('#response').dir = 'ltr'; });
+    await page.setViewportSize({ width: 390, height: 850 });
+    assert.equal((await geometry()).viewportOverflow, false);
+    assert.equal(await page.locator('#list-4 .table-content').evaluate(scroller => {
+        scroller.scrollLeft = 50;
+        return scroller.scrollWidth > scroller.clientWidth && scroller.scrollLeft === 50;
+    }), true);
+    await page.locator('#list-4 button').click();
 });
 
 test('cell widgets, native formula hosts and unsupported attributes stay native, including late-arriving controls', async t => {
@@ -650,6 +1059,87 @@ test('late citations mount before paint without dropping previously repaired tex
             view().querySelector('slot[data-gp-native]').assignedNodes()[0] === citation,
             button.getBoundingClientRect().height > 0];
     }), [true, true, true, true, true, true]);
+});
+
+test('Gemini citation ranges retain the streaming bold and live footnotes on the first frame', async t => {
+    const page = await fixture(t, { text: 'Start **cited text** tail', animated: true,
+        settings: { boldColor: { color: '#ffcc66', customCss: 'font-weight: 800' } } });
+    const result = await page.evaluate(async () => {
+        const oldView = view(), oldBold = oldView.querySelector('b');
+        source.innerHTML = '<span class="citation-120">Start </span><b data-path-to-node="0" data-index-in-node="1">' +
+            '<span class="citation-120">cited text</span></b><span class="citation-120 citation-end-120"> tail' +
+            '<source-footnote><button>Note</button></source-footnote></span> ' +
+            '<sources-carousel-inline><button>Source</button></sources-carousel-inline>';
+        document.querySelector('#response').classList.remove('animate');
+        const original = source.innerHTML;
+        const footnote = source.querySelector('source-footnote');
+        const chip = source.querySelector('sources-carousel-inline');
+        let clicks = 0;
+        footnote.querySelector('button').addEventListener('click', () => clicks++);
+        chip.querySelector('button').addEventListener('click', () => clicks++);
+        await new Promise(requestAnimationFrame);
+        footnote.querySelector('button').click(); chip.querySelector('button').click();
+        const styled = view()?.querySelector('b');
+        return {
+            steady: view() === oldView && styled === oldBold && styled?.textContent === 'cited text',
+            styles: styled && [getComputedStyle(styled).color, getComputedStyle(styled.firstChild.parentElement).fontWeight],
+            liveWidgets: [footnote, chip].every(n => n.getBoundingClientRect().width > 0) && clicks === 2,
+            original: source.innerHTML === original
+        };
+    });
+    assert.deepEqual(result, { steady: true, styles: ['rgb(255, 204, 102)', '800'], liveWidgets: true, original: true });
+    const tree = await page.locator('#answer').ariaSnapshot();
+    for (const text of ['cited text', 'Note', 'Source']) assert.equal(tree.split(text).length, 2, tree);
+});
+
+test('a citation ending inside a native bold keeps both its styling and its original footnote', async t => {
+    const page = await fixture(t, { html: '<b data-path-to-node="0"><span class="citation-5 citation-end-5">cited' +
+        '<source-footnote><button>Note</button></source-footnote></span></b> **tail**',
+        settings: { boldColor: { color: '#ffcc66', customCss: 'font-weight: 800' } } });
+    const styles = () => page.evaluate(() => {
+        const bold = source.querySelector('b');
+        return [getComputedStyle(bold).color, getComputedStyle(bold).fontWeight, source.innerHTML === originalMarkup];
+    });
+    assert.deepEqual(await styles(), ['rgb(255, 204, 102)', '800', true]);
+    await page.locator('source-footnote button').click();
+    await page.evaluate(() => engine.updateSettings({ enabled: false }));
+    assert.deepEqual(await styles(), ['rgb(0, 0, 0)', '700', true]);
+    await page.evaluate(() => engine.updateSettings({ enabled: true }));
+    assert.deepEqual(await styles(), ['rgb(255, 204, 102)', '800', true]);
+});
+
+test('identical native citation HTML still updates the visible slot when Gemini replaces the node', async t => {
+    const page = await fixture(t, { html: '**steady** <sources-carousel-inline><button>Source</button></sources-carousel-inline>' });
+    assert.deepEqual(await page.evaluate(async () => {
+        const oldBold = view().querySelector('b');
+        const chip = source.querySelector('sources-carousel-inline');
+        const replacement = chip.cloneNode(true);
+        chip.replaceWith(replacement);
+        await new Promise(requestAnimationFrame);
+        return [view().querySelector('b') === oldBold, source.innerHTML === originalMarkup,
+            view().querySelector('slot[data-gp-native]').assignedNodes()[0] === replacement,
+            replacement.getBoundingClientRect().width > 0];
+    }), [true, true, true, true]);
+});
+
+test('an open citation retains focus when a newly completed inline token shifts its position', async t => {
+    const page = await fixture(t, { html: '**steady** <sources-carousel-inline><button id="focus-chip">Source</button>' +
+        '<div id="open-citation" hidden>Details</div></sources-carousel-inline>' });
+    await page.evaluate(() => {
+        const chip = document.querySelector('#focus-chip');
+        chip.addEventListener('click', () => { document.querySelector('#open-citation').hidden = false; });
+    });
+    await page.locator('#focus-chip').click();
+    const outcome = await page.evaluate(async () => {
+        const chip = document.querySelector('#focus-chip');
+        const bold = view().querySelector('b');
+        source.firstChild.data = '**steady** `new code` ';
+        await new Promise(resolve => setTimeout(resolve, 45));
+        await new Promise(requestAnimationFrame);
+        return [document.activeElement === chip, !document.querySelector('#open-citation').hidden,
+            view().querySelector('b') === bold, view().querySelector('code')?.textContent];
+    });
+    assert.deepEqual(outcome, [true, true, true, 'new code']);
 });
 
 test('citation focus, popup handlers and component lifecycle survive streaming and rapid toggles', async t => {
@@ -762,6 +1252,31 @@ test('class-only completion is observed and identical content does not rewrite t
     await page.evaluate(() => document.querySelector('footer').classList.remove('animated'));
     await page.waitForFunction(count => engine.diagnostics().flushes > count, before.flushes);
     assert.equal(await page.evaluate(() => engine.diagnostics().renderWrites), before.renderWrites);
+});
+
+test('streaming animation updates do not re-render formulas in earlier responses', async t => {
+    const page = await fixture(t, { text: '$x^2$', animated: true });
+    await page.evaluate(() => {
+        const previous = document.createElement('section');
+        previous.className = 'markdown';
+        previous.innerHTML = '<p id="previous-formula">$y^2$</p>';
+        source.parentElement.before(previous);
+    });
+    await page.waitForFunction(() => document.querySelector('#previous-formula').shadowRoot?.querySelector('.katex'));
+    const equations = await page.evaluate(async () => {
+        const formulas = [];
+        const native = katex.render;
+        katex.render = (expression, ...args) => {
+            formulas.push(expression);
+            native(expression, ...args);
+        };
+        const response = document.querySelector('#response');
+        response.style.setProperty('--animation-duration', '120ms');
+        source.append(document.createElement('br'));
+        await new Promise(requestAnimationFrame);
+        return formulas;
+    });
+    assert.deepEqual(equations, ['x^2']);
 });
 
 test('500 synchronous updates coalesce and a sustained stream renders before its final token', async t => {

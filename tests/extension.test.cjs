@@ -16,13 +16,23 @@ test('installed MV3 extension renders and toggles through the real popup and sto
     await context.route('https://gemini.google.com/**', route => route.fulfill({
         contentType: 'text/html',
         headers: { 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' chrome-extension:; require-trusted-types-for 'script'; trusted-types 'none'" },
-        body: '<!doctype html><style>body{font:20px/1.5 Arial;margin:32px}.chat-container{width:420px}</style><div class="chat-container"><p id="answer">**live answer** and $x^2$</p><p id="cited">**cited answer** <sources-carousel-inline><button id="chip">PNG</button></sources-carousel-inline></p><table><tr><td><span data-path-to-node="1,0">**table answer** and $x^2$</span></td></tr></table><footer class="response-footer animated"></footer></div>'
+        body: '<!doctype html><style>body{font:20px/1.5 Arial;margin:32px}.chat-container{width:420px}.markdown.animate .pending{display:none}.markdown.animate .animating{animation:fade 20s linear forwards}@keyframes fade{from{opacity:0}to{opacity:1}}</style><div class="chat-container"><div class="markdown animate"><p id="reveal"><span class="pending">**1 </span><span class="pending">2 </span><span class="pending">3**</span></p><p id="answer">**live answer** and $x^2$</p><p id="cited">**cited answer** <sources-carousel-inline><button id="chip">PNG</button></sources-carousel-inline></p><table><tr><td><span data-path-to-node="1,0">**table answer** and $x^2$</span></td></tr></table><footer class="response-footer animated"></footer></div></div>'
     }));
     const page = await context.newPage();
     await page.goto('https://gemini.google.com/app');
     await page.waitForFunction(() => document.querySelector('#answer').shadowRoot?.querySelector('.katex'));
     await page.waitForFunction(() => document.querySelector('td > span').shadowRoot?.querySelector('.katex'));
     await page.waitForFunction(() => document.querySelector('#cited').shadowRoot?.querySelector('b'));
+    await page.waitForFunction(() => document.querySelector('#reveal').shadowRoot?.querySelector('b')?.textContent === '1 2 3');
+    assert.equal(await page.evaluate(async () => {
+        const source = document.querySelector('#reveal'), view = source.shadowRoot.querySelector('.gp-view'), bold = view.querySelector('b');
+        for (const span of source.children) {
+            span.className = 'animating'; await new Promise(resolve=>setTimeout(resolve,60));
+            if (source.shadowRoot.querySelector('.gp-view') !== view || view.querySelector('b') !== bold || view.textContent !== '1 2 3') return false;
+            span.className = '';
+        }
+        return true;
+    }), true);
     await page.evaluate(() => {
         window.nativeChip = document.querySelector('#chip'); window.chipClicks = 0;
         nativeChip.addEventListener('click', () => chipClicks++);
